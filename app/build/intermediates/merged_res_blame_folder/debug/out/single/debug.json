@@ -1,0 +1,6 @@
+[
+    {
+        "merged": "com.employee.agent.app-merged_res-35:/xml_accessibility_service_config.xml.flat",
+        "source": "com.employee.agent.app-main-37:/xml/accessibility_service_config.xml"
+    }
+]
