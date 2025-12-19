@@ -2,4 +2,5 @@
 <resources>
     <string name="app_name">Employee Agent</string>
     <string name="accessibility_service_description">Agent for Employee GUI Automation</string>
+    <string name="accessibility_service_description_v2">Enhanced AI Agent V2.0 - 支持多模态视觉、智能记忆、任务规划、错误恢复和PC协作</string>
 </resources>

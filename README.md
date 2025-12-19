@@ -1,59 +1,132 @@
-# 📱 Android AI Agent
+# 📱 Android AI Agent V2.0
 
-基于无障碍服务 (AccessibilityService) 的自主手机 AI Agent。
+基于无障碍服务 (AccessibilityService) 的自主手机 AI Agent，采用长期主义架构设计。
 
-## 🎯 功能特性
+## 🎯 V2.0 新特性
 
-- ✅ **无需 Root**：基于 AccessibilityService，普通用户可用
+### 核心能力
+- ✅ **多模态视觉**：结合 UI 树 + Vision API，理解图片、图标、广告
+- ✅ **智能记忆**：学习历史操作，记住成功路径，优化决策
+- ✅ **任务规划**：层次任务分析(HTA)，复杂任务分解
+- ✅ **错误恢复**：智能识别并自动处理 6 类常见错误
+- ✅ **PC 协作**：WebSocket 双向通信，PC 下发目标、实时同步
+
+### 基础能力
+- ✅ **无需 Root**：基于 AccessibilityService
 - ✅ **AI 驱动**：集成混元 API，自主决策和执行
 - ✅ **完整工具系统**：tap、swipe、input、press_key 等
 - ✅ **DDD 架构**：Domain → Application → Infrastructure → Interface
 - ✅ **前台服务**：防止被系统杀死
-- ✅ **Socket 兼容**：保持与 PC 端的 Socket 通信
 
-## 🏗️ 架构
+## 🏗️ V2.0 架构
 
 ```
-domain/          # 领域层（纯业务逻辑）
-  ├── agent/     # Agent 状态、目标、记忆
-  ├── screen/    # UI 节点模型
-  └── tool/      # 工具接口定义
+domain/           # 领域层（纯业务逻辑）
+  ├── agent/      # Agent 状态、目标、记忆
+  ├── screen/     # UI 节点模型
+  ├── tool/       # 工具接口定义
+  ├── planning/   # 📦 任务规划接口
+  └── recovery/   # 📦 错误恢复策略
 
-application/     # 应用层（用例编排）
-  └── AgentRuntime.kt  # Agent 主循环
+application/      # 应用层（用例编排）
+  ├── AgentRuntime.kt           # Agent 主循环 (V1)
+  ├── EnhancedAgentRuntime.kt   # 📦 增强运行时 (V2)
+  └── planning/                 # 📦 AI 任务规划器
 
-infrastructure/  # 基础设施层（技术实现）
+infrastructure/   # 基础设施层（技术实现）
   ├── accessibility/  # 无障碍服务封装
-  ├── ai/            # AI 客户端
-  └── tools/         # 具体工具实现
+  ├── ai/            # AI 客户端 (混元)
+  ├── tools/         # 具体工具实现
+  ├── vision/        # 📦 多模态视觉分析
+  ├── storage/       # 📦 Room 数据库 + 记忆仓库
+  ├── network/       # 📦 WebSocket + PC 桥接
+  └── recovery/      # 📦 通用恢复策略
 
-interface/       # 接口层
-  └── AgentService.kt  # 无障碍服务入口
+interface/        # 接口层
+  ├── AgentService.kt    # 无障碍服务入口 (V1)
+  └── AgentServiceV2.kt  # 📦 增强版服务 (V2)
 ```
 
 ## 🚀 快速开始
 
-### 1. 配置 API Key
-
-编辑 `AgentService.kt`：
-
-```kotlin
-val apiKey = "your_hunyuan_api_key_here"
-```
-
-### 2. 启用无障碍服务
-
-```
-设置 → 辅助功能 → 无障碍 → AndroidAgent → 开启
-```
-
-### 3. 测试
-
-服务启动后会自动执行测试目标（打开微信）。查看 Logcat：
+### 1. 构建安装
 
 ```bash
-adb logcat | grep Agent
+./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+### 2. 配置 API Key（App 内设置）
+
+打开 App，在配置界面填写：
+
+| 配置项 | 必填 | 说明 |
+|--------|------|------|
+| 混元 API Key | ✅ | 用于 AI 决策，从腾讯云获取 |
+| 视觉服务 | ❌ | 选择通义千问 VL 或 GPT-4V |
+| 通义千问 VL Key | ❌ | 用于图片理解 |
+| OpenAI Key | ❌ | 用于 GPT-4V 视觉 |
+| WebSocket 端口 | ❌ | PC 连接端口，默认 11452 |
+
+> 💡 所有配置都在 App 内完成，无需修改代码！
+
+### 3. 启用无障碍服务
+
+```
+设置 → 辅助功能 → 无障碍 → Employee Agent V2 → 开启
+```
+
+### 4. 测试
+
+```bash
+# 查看所有日志
+adb logcat | grep Agent
+
+# 查看 AI 决策
+adb logcat | grep EnhancedAgentRuntime
+
+# 查看错误恢复
+adb logcat | grep Recovery
+```
+
+## 🌐 PC 端协作
+
+### WebSocket 连接（推荐）
+
+```typescript
+// PC 端 TypeScript
+const ws = new WebSocket('ws://<phone_ip>:11452');
+
+// 发送目标
+ws.send(JSON.stringify({
+  type: 'goal',
+  payload: {
+    description: '打开微信并发送消息给张三',
+    maxSteps: 20
+  }
+}));
+
+// 接收进度
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === 'progress') {
+    console.log(`步骤 ${msg.payload.step}: ${msg.payload.action}`);
+  }
+};
+```
+
+### 协议消息类型
+
+| 类型 | 方向 | 说明 |
+|------|------|------|
+| `goal` | PC→手机 | 设置执行目标 |
+| `command` | PC→手机 | 暂停/继续/取消 |
+| `status` | 手机→PC | 状态更新 |
+| `progress` | 手机→PC | 执行进度 |
+| `screen` | 手机→PC | 屏幕内容 |
+| `thinking` | 手机→PC | AI 思考过程 |
+| `result` | 手机→PC | 执行结果 |
+| `error` | 手机→PC | 错误信息 |
 
 ## 🛠️ 可用工具
 
@@ -66,75 +139,60 @@ adb logcat | grep Agent
 | `wait` | `milliseconds: Long` | 等待 |
 | `get_screen` | - | 获取屏幕 UI |
 
-## 📝 自定义目标
+## 🧠 智能记忆系统
+
+V2.0 自动学习并记住：
+- ✅ 每个目标的成功执行路径
+- ✅ App 内常用操作的快捷方式
+- ✅ 错误场景的处理策略
+- ✅ 用户偏好和习惯
 
 ```kotlin
-val goal = Goal(
-    description = "打开微信并发送消息给张三",
-    completionCondition = CompletionCondition.AIDecided,
-    maxSteps = 20,
-    timeoutSeconds = 60
-)
+// 手动查询学习的模式
+val patterns = memoryRepository.getLearnedPatterns("click_wechat_contact")
 
-agentRuntime?.executeGoal(goal)
+// 查询目标的历史执行
+val history = memoryRepository.getGoalActions("goal-uuid")
 ```
 
-## 🔧 添加新工具
+## 🔧 错误恢复策略
 
-1. 实现 `Tool` 接口：
+内置 6 种自动恢复策略：
 
-```kotlin
-class MyCustomTool : Tool {
-    override val name = "my_tool"
-    override val description = "我的自定义工具"
-    override val parameters = listOf(...)
-    
-    override suspend fun execute(params: Map<String, Any>): ActionResult {
-        // 实现逻辑
-    }
-}
-```
+| 策略 | 触发条件 | 恢复动作 |
+|------|----------|----------|
+| `DialogDismiss` | 检测到对话框 | 自动点击确定/取消 |
+| `PermissionRequest` | 权限请求弹窗 | 自动授予权限 |
+| `ElementNotFound` | 目标元素不存在 | 滚动查找/等待加载 |
+| `AppCrash` | 应用崩溃 | 重启应用 |
+| `ScreenChanged` | 意外页面跳转 | 返回上一页/重新导航 |
+| `NetworkError` | 网络问题 | 等待重试 |
 
-2. 在 `AgentService` 中注册：
+## 📊 与主流 Agent 对比
 
-```kotlin
-toolRegistry.register(MyCustomTool())
-```
-
-## 📊 日志查看
-
-```bash
-# 查看所有 Agent 日志
-adb logcat | grep "Agent"
-
-# 查看 AI 响应
-adb logcat | grep "AgentRuntime"
-
-# 查看手势执行
-adb logcat | grep "GestureExecutor"
-```
+| 特性 | 本项目 | AppAgent | MobileAgent |
+|------|--------|----------|-------------|
+| 底层技术 | AccessibilityService | ADB + OCR | VLM + ADB |
+| 需要 Root | ❌ | ❌ | ❌ |
+| 视觉理解 | ✅ Hybrid | ✅ GPT-4V | ✅ Qwen-VL |
+| 记忆学习 | ✅ | ❌ | ❌ |
+| PC 协作 | ✅ WebSocket | ❌ | ❌ |
+| 错误恢复 | ✅ 自动 | ❌ | 部分 |
 
 ## ⚠️ 已知限制
 
-1. **AI API Key**：需要自行配置混元 API Key
+1. **API Key**：需要配置混元/通义千问/OpenAI API Key
 2. **厂商限制**：部分国产 ROM 会限制无障碍服务
-3. **网络请求**：需要 INTERNET 权限
-4. **前台通知**：会常驻通知栏
-
-## 🔄 与 PC 端集成
-
-保留了原有的 Socket 服务器（端口 11451），可继续使用 PC 端程序控制：
-
-```bash
-# PC 端发送命令
-echo "DUMP" | nc <phone_ip> 11451
-```
+3. **Android 版本**：minSdk 26 (Android 8.0+)
+4. **截图权限**：Android 11+ 无障碍服务可直接截图，低版本需要 MediaProjection
 
 ## 📦 依赖
 
 - Kotlin 1.8.22
 - Kotlin Coroutines 1.7.3
+- Room 2.6.1 (SQLite ORM)
 - Gson 2.10.1
+- OkHttp 4.12.0
 - AndroidX Core/AppCompat
 - Material Design
 
