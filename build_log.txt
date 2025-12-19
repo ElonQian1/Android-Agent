@@ -1,0 +1,69 @@
+
+> Configure project :app
+WARNING:The option setting 'android.overridePathCheck=true' is experimental.
+The current default is 'false'.
+WARNING:We recommend using a newer Android Gradle plugin to use compileSdk = 34
+
+This Android Gradle plugin (7.4.2) was tested up to compileSdk = 33
+
+This warning can be suppressed by adding
+    android.suppressUnsupportedCompileSdk=34
+to this project's gradle.properties
+
+The build will continue, but you are strongly encouraged to update your project to
+use a newer Android Gradle Plugin that has been tested with compileSdk = 34
+
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:compileDebugAidl NO-SOURCE
+> Task :app:compileDebugRenderscript NO-SOURCE
+> Task :app:generateDebugBuildConfig FROM-CACHE
+> Task :app:checkDebugAarMetadata
+> Task :app:generateDebugResValues FROM-CACHE
+> Task :app:mapDebugSourceSetPaths
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources FROM-CACHE
+> Task :app:createDebugCompatibleScreenManifests
+> Task :app:extractDeepLinksDebug FROM-CACHE
+> Task :app:processDebugMainManifest FROM-CACHE
+> Task :app:processDebugManifest FROM-CACHE
+> Task :app:processDebugManifestForPackage FROM-CACHE
+> Task :app:processDebugResources FROM-CACHE
+> Task :app:javaPreCompileDebug FROM-CACHE
+> Task :app:mergeDebugShaders FROM-CACHE
+> Task :app:compileDebugShaders NO-SOURCE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets FROM-CACHE
+> Task :app:compressDebugAssets FROM-CACHE
+> Task :app:processDebugJavaRes NO-SOURCE
+> Task :app:desugarDebugFileDependencies FROM-CACHE
+> Task :app:checkDebugDuplicateClasses
+> Task :app:mergeDebugJniLibFolders FROM-CACHE
+> Task :app:mergeExtDexDebug FROM-CACHE
+> Task :app:mergeLibDexDebug FROM-CACHE
+> Task :app:mergeDebugNativeLibs NO-SOURCE
+> Task :app:stripDebugDebugSymbols NO-SOURCE
+> Task :app:validateSigningDebug
+> Task :app:writeDebugAppMetadata
+> Task :app:writeDebugSigningConfigVersions
+
+> Task :app:kaptGenerateStubsDebugKotlin FAILED
+e: Could not load module <Error module>
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:kaptGenerateStubsDebugKotlin'.
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction
+   > Compilation error. See log for more details
+
+* Try:
+24 actionable tasks: 8 executed, 16 from cache
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+
+* Get more help at https://help.gradle.org
+
+BUILD FAILED in 6s

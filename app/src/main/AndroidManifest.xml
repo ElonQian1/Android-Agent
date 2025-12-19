@@ -9,7 +9,6 @@
     
     <!-- V2.0 新增权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_ACCESSIBILITY" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
@@ -49,7 +48,7 @@
             android:name=".AgentServiceV2"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"
-            android:foregroundServiceType="mediaProjection|accessibility">
+            android:foregroundServiceType="mediaProjection">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
