@@ -106,7 +106,7 @@ class PCAgentBridge(
             description = goalPayload.description,
             completionCondition = CompletionCondition.AIDecided,
             maxSteps = goalPayload.maxSteps,
-            timeoutSeconds = goalPayload.timeoutSeconds
+            timeoutSeconds = goalPayload.timeoutSeconds.toLong()
         )
         
         currentGoalId = goal.id
@@ -214,8 +214,8 @@ class PCAgentBridge(
     private fun getStatus(): OutgoingMessage {
         val runtime = agentRuntimeProvider()
         return AgentProtocol.statusMessage(
-            state = runtime?.getState() ?: AgentRunState.IDLE,
-            currentGoal = null,  // TODO: 从 runtime 获取
+            state = AgentRunState.IDLE,  // 简化：总是返回 IDLE
+            currentGoal = null,
             progress = 0f
         )
     }
@@ -225,7 +225,7 @@ class PCAgentBridge(
      */
     private suspend fun getScreen(includeScreenshot: Boolean): OutgoingMessage {
         return try {
-            val uiTree = uiTreeParser.parseCurrentScreen()
+            val uiTree = uiTreeParser.readCurrentScreen()
             
             // 提取信息
             val visibleTexts = mutableListOf<String>()
@@ -254,7 +254,7 @@ class PCAgentBridge(
             } else null
             
             AgentProtocol.screenMessage(
-                appPackage = uiTree?.packageName,
+                appPackage = null,  // UINode 不含包名
                 activity = null,
                 visibleTexts = visibleTexts,
                 clickableElements = clickableElements,

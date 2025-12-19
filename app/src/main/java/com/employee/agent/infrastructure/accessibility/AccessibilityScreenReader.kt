@@ -15,7 +15,7 @@ class AccessibilityScreenReader(
     private val parser = UITreeParser(service)
     
     override suspend fun readCurrentScreen(): UINode {
-        return parser.parseCurrentScreen() 
+        return parser.readCurrentScreen() 
             ?: UINode(
                 className = "Error",
                 text = "无法读取屏幕",

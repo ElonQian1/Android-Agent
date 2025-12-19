@@ -366,7 +366,7 @@ class WebSocketServer(
             // 查找处理器
             val handler = messageHandlers[type]
             if (handler != null) {
-                val response = handler.handle(clientId, payload?.toString() ?: "{}")
+                val response = handler(clientId, payload?.toString() ?: "{}")
                 if (response != null) {
                     sendTo(clientId, response)
                 }
@@ -457,11 +457,9 @@ class ClientConnection(
 }
 
 /**
- * 消息处理器接口
+ * 消息处理器类型别名（支持 suspend lambda）
  */
-interface MessageHandler {
-    suspend fun handle(clientId: String, payload: String): OutgoingMessage?
-}
+typealias MessageHandler = suspend (clientId: String, payload: String) -> OutgoingMessage?
 
 /**
  * 服务器事件

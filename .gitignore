@@ -89,3 +89,9 @@ lint/tmp/
 # OS
 .DS_Store
 Thumbs.db
+
+# Build logs
+compile_full.txt
+fresh_build.txt
+kotlin_errors.txt
+build_log.txt

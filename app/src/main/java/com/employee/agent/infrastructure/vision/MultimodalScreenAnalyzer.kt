@@ -16,11 +16,6 @@ import kotlinx.coroutines.coroutineScope
  * 融合策略：
  * 1. UI 树 - 精确的元素结构和坐标
  * 2. 截图 - 视觉上下文和 OCR 补充
- * 
- * 使用场景：
- * - UI 树获取失败时（WebView、游戏）
- * - 需要理解视觉布局时
- * - 验证 UI 树是否准确
  */
 class MultimodalScreenAnalyzer(
     private val screenshotCapture: ScreenshotCapture,
@@ -29,6 +24,39 @@ class MultimodalScreenAnalyzer(
 ) {
     companion object {
         private const val TAG = "MultimodalAnalyzer"
+        
+        private const val DEFAULT_VISION_PROMPT = """
+分析这个 Android 屏幕截图，请描述：
+1. 当前在什么 App 的什么页面
+2. 页面上有哪些可交互的元素（按钮、输入框、列表项等）
+3. 每个元素的大致位置（上/中/下，左/中/右）
+4. 如果有弹窗或对话框，请特别标注
+
+请用 JSON 格式返回：
+{
+  "app": "应用名称",
+  "page": "页面类型",
+  "elements": [
+    {"text": "元素文本", "type": "button/input/text/image", "position": "位置描述"}
+  ],
+  "hasDialog": false,
+  "summary": "一句话描述当前状态"
+}
+"""
+        
+        private const val HYBRID_VISION_PROMPT = """
+UI 树信息不完整，请通过截图补充分析：
+1. 识别图片中的文字（OCR）
+2. 识别可能的按钮和可点击区域
+3. 描述页面整体布局
+
+简洁返回 JSON：
+{
+  "ocrTexts": ["识别到的文字"],
+  "clickableAreas": [{"description": "描述", "position": "位置"}],
+  "layout": "布局描述"
+}
+"""
     }
     
     /**
@@ -61,7 +89,7 @@ class MultimodalScreenAnalyzer(
      */
     private suspend fun analyzeWithUITree(): ScreenAnalysisResult {
         return try {
-            val uiTree = uiTreeParser.parseCurrentScreen()
+            val uiTree = uiTreeParser.readCurrentScreen()
             val elements = flattenUITree(uiTree)
             
             ScreenAnalysisResult(
@@ -140,11 +168,9 @@ class MultimodalScreenAnalyzer(
     
     /**
      * 混合分析（推荐）
-     * UI 树为主，截图为辅
      */
     private suspend fun analyzeHybrid(prompt: String?): ScreenAnalysisResult = coroutineScope {
-        // 并行获取 UI 树和截图
-        val uiTreeDeferred = async { runCatching { uiTreeParser.parseCurrentScreen() } }
+        val uiTreeDeferred = async { runCatching { uiTreeParser.readCurrentScreen() } }
         val screenshotDeferred = async { screenshotCapture.captureScreenBase64() }
         
         val uiTreeResult = uiTreeDeferred.await()
@@ -185,7 +211,6 @@ class MultimodalScreenAnalyzer(
             )
         }
         
-        // 返回尽可能多的信息
         ScreenAnalysisResult(
             success = uiTree != null || screenshotResult is ScreenshotResult.Success,
             uiTree = uiTree,
@@ -199,31 +224,26 @@ class MultimodalScreenAnalyzer(
     
     /**
      * Vision 优先分析
-     * 适用于复杂场景，如需要理解页面语义
      */
     private suspend fun analyzeVisionPriority(prompt: String?): ScreenAnalysisResult = coroutineScope {
         if (visionClient == null) {
             return@coroutineScope analyzeWithUITree()
         }
         
-        // 并行获取
-        val uiTreeDeferred = async { runCatching { uiTreeParser.parseCurrentScreen() } }
+        val uiTreeDeferred = async { runCatching { uiTreeParser.readCurrentScreen() } }
         val screenshotDeferred = async { screenshotCapture.captureScreenBase64() }
         
         val uiTreeResult = uiTreeDeferred.await()
         val screenshotResult = screenshotDeferred.await()
         
         if (screenshotResult !is ScreenshotResult.Success) {
-            // 截图失败，回退到 UI 树
             return@coroutineScope analyzeWithUITree()
         }
         
         val uiTree = uiTreeResult.getOrNull()
         val elements = uiTree?.let { flattenUITree(it) } ?: emptyList()
         
-        // 构建增强的 prompt，包含 UI 树信息
         val enhancedPrompt = buildEnhancedPrompt(prompt, elements)
-        
         val visionResult = visionClient.analyzeImage(screenshotResult.base64, enhancedPrompt)
         
         ScreenAnalysisResult(
@@ -244,20 +264,17 @@ class MultimodalScreenAnalyzer(
     private fun flattenUITree(node: UINode?, list: MutableList<UIElement> = mutableListOf()): List<UIElement> {
         if (node == null) return list
         
-        // 添加有意义的节点
-        if (node.isClickable || node.isScrollable || !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()) {
+        if (node.isClickable || !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()) {
             list.add(UIElement(
                 id = list.size,
                 text = node.text ?: node.contentDescription ?: "",
                 className = node.className,
-                bounds = node.boundsInScreen,
+                bounds = "[${node.bounds.left},${node.bounds.top}][${node.bounds.right},${node.bounds.bottom}]",
                 isClickable = node.isClickable,
-                isScrollable = node.isScrollable,
                 resourceId = node.resourceId
             ))
         }
         
-        // 递归处理子节点
         node.children.forEach { child ->
             flattenUITree(child, list)
         }
@@ -273,41 +290,6 @@ class MultimodalScreenAnalyzer(
         } else ""
         
         return (customPrompt ?: DEFAULT_VISION_PROMPT) + elementsSummary
-    }
-    
-    companion object {
-        private const val DEFAULT_VISION_PROMPT = """
-分析这个 Android 屏幕截图，请描述：
-1. 当前在什么 App 的什么页面
-2. 页面上有哪些可交互的元素（按钮、输入框、列表项等）
-3. 每个元素的大致位置（上/中/下，左/中/右）
-4. 如果有弹窗或对话框，请特别标注
-
-请用 JSON 格式返回：
-{
-  "app": "应用名称",
-  "page": "页面类型",
-  "elements": [
-    {"text": "元素文本", "type": "button/input/text/image", "position": "位置描述"}
-  ],
-  "hasDialog": false,
-  "summary": "一句话描述当前状态"
-}
-"""
-        
-        private const val HYBRID_VISION_PROMPT = """
-UI 树信息不完整，请通过截图补充分析：
-1. 识别图片中的文字（OCR）
-2. 识别可能的按钮和可点击区域
-3. 描述页面整体布局
-
-简洁返回 JSON：
-{
-  "ocrTexts": ["识别到的文字"],
-  "clickableAreas": [{"description": "描述", "position": "位置"}],
-  "layout": "布局描述"
-}
-"""
     }
 }
 
@@ -325,24 +307,17 @@ data class ScreenAnalysisResult(
     val error: String? = null,
     val analysisMode: MultimodalScreenAnalyzer.AnalysisMode
 ) {
-    /**
-     * 获取用于 AI 决策的上下文文本
-     */
     fun toContextString(): String {
         val parts = mutableListOf<String>()
         
-        // UI 元素列表
         if (elements.isNotEmpty()) {
             parts.add("=== 可交互元素 ===")
             elements.forEachIndexed { index, element ->
-                val bounds = element.bounds
                 parts.add("[$index] ${element.text.ifBlank { element.className?.substringAfterLast('.') ?: "未知" }} " +
-                    "(${if (element.isClickable) "可点击" else ""}${if (element.isScrollable) "可滚动" else ""}) " +
-                    "坐标: $bounds")
+                    "(${if (element.isClickable) "可点击" else ""}) 坐标: ${element.bounds}")
             }
         }
         
-        // Vision 描述
         visionDescription?.let {
             parts.add("\n=== 视觉分析 ===")
             parts.add(it)
@@ -361,6 +336,5 @@ data class UIElement(
     val className: String?,
     val bounds: String?,
     val isClickable: Boolean,
-    val isScrollable: Boolean,
     val resourceId: String?
 )
