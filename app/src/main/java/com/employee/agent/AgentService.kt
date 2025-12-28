@@ -46,6 +46,7 @@ class AgentService : AccessibilityService() {
         
         // 启动 Socket 服务器（PC 通信）
         socketServer = SocketServer(this)
+        socketServer?.loadSavedApiKey()  // 🆕 自动加载保存的 API Key
         socketServer?.start(11451)
         
         Log.i(TAG, "✅ Agent 服务已启动，等待 PC 端连接")

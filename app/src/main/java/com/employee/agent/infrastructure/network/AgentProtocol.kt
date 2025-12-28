@@ -246,7 +246,9 @@ enum class AgentCommand {
     TAP,            // 点击
     SWIPE,          // 滑动
     INPUT,          // 输入
-    PRESS_KEY       // 按键
+    PRESS_KEY,      // 按键
+    ANALYZE_SCREEN, // 智能分析屏幕（AI Agent）
+    GENERATE_SCRIPT // 生成执行脚本（AI Agent）
 }
 
 /**
