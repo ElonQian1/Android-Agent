@@ -102,6 +102,9 @@ enum class StepType {
     /** 输入文本 */
     INPUT_TEXT,
     
+    /** 搜索（等同于FIND_AND_TAP） */
+    SEARCH,
+    
     /** 返回 */
     BACK,
     

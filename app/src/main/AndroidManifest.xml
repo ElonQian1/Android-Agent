@@ -11,6 +11,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    
+    <!-- 语音识别权限 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="true"
@@ -18,16 +21,62 @@
         android:supportsRtl="true"
         tools:targetApi="31">
 
-        <!-- 配置界面 -->
+        <!-- 独立执行界面（主入口） -->
         <activity
-            android:name=".AgentConfigActivity"
+            android:name=".AgentExecuteActivity"
             android:exported="true"
-            android:label="AI Agent 配置">
+            android:label="AI Agent"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        
+        <!-- 配置界面 -->
+        <activity
+            android:name=".AgentConfigActivity"
+            android:exported="true"
+            android:label="AI Agent 配置">
+        </activity>
+
+        <!-- 通知栏快捷操作接收器 -->
+        <receiver
+            android:name=".infrastructure.NotificationActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.employee.agent.ACTION_OPEN_APP" />
+                <action android:name="com.employee.agent.ACTION_QUICK_TASK" />
+                <action android:name="com.employee.agent.ACTION_STOP" />
+            </intent-filter>
+        </receiver>
+        
+        <!-- 悬浮球服务 -->
+        <service
+            android:name=".infrastructure.floating.FloatingBallService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="floating_ball_overlay" />
+        </service>
+        
+        <!-- 悬浮球语音输入Activity (透明) -->
+        <activity
+            android:name=".infrastructure.floating.FloatingVoiceActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop" />
+        
+        <!-- 悬浮球文字输入Activity (透明) -->
+        <activity
+            android:name=".infrastructure.floating.FloatingInputActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="stateVisible|adjustResize" />
 
         <!-- 无障碍服务 V1 (保留兼容) -->
         <service

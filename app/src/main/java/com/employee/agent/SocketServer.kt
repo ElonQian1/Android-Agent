@@ -6,10 +6,12 @@ import android.graphics.Rect
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import com.employee.agent.application.AIAutonomousEngine
+import com.employee.agent.application.ScriptEngine
 import com.employee.agent.domain.screen.UINode
 import com.employee.agent.infrastructure.vision.ScreenAnalyzer
 import com.employee.agent.infrastructure.vision.ScriptGenerator
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -31,7 +33,7 @@ class SocketServer(private val service: AccessibilityService) {
     private var serverSocket: ServerSocket? = null
     private var isRunning = false
     private val executor = Executors.newCachedThreadPool()
-    private val gson = Gson()
+    private val gson = GsonBuilder().setPrettyPrinting().create()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
     // 智能分析组件
@@ -40,6 +42,9 @@ class SocketServer(private val service: AccessibilityService) {
     
     // 🆕 AI 自主执行引擎 (需要 API Key)
     private var aiEngine: AIAutonomousEngine? = null
+    
+    // 🆕 脚本引擎
+    private var scriptEngine: ScriptEngine? = null
     
     // API Key 配置 (用户的腾讯混元 Key)
     private var apiKey: String = ""
@@ -60,7 +65,8 @@ class SocketServer(private val service: AccessibilityService) {
             saveApiKey(key)
             
             aiEngine = AIAutonomousEngine(service, key)
-            Log.i("Agent", "AI 引擎已初始化，API Key 已保存")
+            scriptEngine = ScriptEngine(service, key)  // 🆕 初始化脚本引擎
+            Log.i("Agent", "AI 引擎和脚本引擎已初始化，API Key 已保存")
         }
     }
     
@@ -87,7 +93,8 @@ class SocketServer(private val service: AccessibilityService) {
             if (savedKey.isNotBlank()) {
                 apiKey = savedKey
                 aiEngine = AIAutonomousEngine(service, savedKey)
-                Log.i("Agent", "已加载保存的 API Key，AI 引擎已就绪")
+                scriptEngine = ScriptEngine(service, savedKey)  // 🆕 初始化脚本引擎
+                Log.i("Agent", "已加载保存的 API Key，AI 引擎和脚本引擎已就绪")
             } else {
                 Log.i("Agent", "没有保存的 API Key")
             }
@@ -166,13 +173,47 @@ class SocketServer(private val service: AccessibilityService) {
                     // 🆕 停止 AI 执行
                     handleStopAI(output)
                 }
+                // ========== 🆕 脚本系统命令 ==========
+                command.startsWith("SCRIPT_GENERATE:") -> {
+                    val goal = command.removePrefix("SCRIPT_GENERATE:").trim()
+                    handleScriptGenerate(goal, output, socket)
+                    return
+                }
+                command.startsWith("SCRIPT_EXECUTE:") -> {
+                    val scriptId = command.removePrefix("SCRIPT_EXECUTE:").trim()
+                    handleScriptExecute(scriptId, output, socket)
+                    return
+                }
+                command.startsWith("SCRIPT_EXECUTE_AUTO:") -> {
+                    val scriptId = command.removePrefix("SCRIPT_EXECUTE_AUTO:").trim()
+                    handleScriptExecuteAuto(scriptId, output, socket)
+                    return
+                }
+                command.startsWith("SCRIPT_IMPROVE:") -> {
+                    val scriptId = command.removePrefix("SCRIPT_IMPROVE:").trim()
+                    handleScriptImprove(scriptId, output)
+                }
+                command.startsWith("SCRIPT_GET:") -> {
+                    val scriptId = command.removePrefix("SCRIPT_GET:").trim()
+                    handleScriptGet(scriptId, output)
+                }
+                command == "SCRIPT_LIST" -> {
+                    handleScriptList(output)
+                }
+                command.startsWith("SCRIPT_DELETE:") -> {
+                    val scriptId = command.removePrefix("SCRIPT_DELETE:").trim()
+                    handleScriptDelete(scriptId, output)
+                }
+                // ========== 状态检查 ==========
                 command == "STATUS" -> {
                     // 状态检查
                     val hasAI = aiEngine != null
-                    output.println("""{"status":"ok","version":"2.1","ai_enabled":$hasAI,"features":["DUMP","ANALYZE","GENERATE_SCRIPT","SET_API_KEY","RUN_AI_GOAL","STOP_AI"]}""")
+                    val hasScript = scriptEngine != null
+                    val scriptCount = scriptEngine?.listScripts()?.size ?: 0
+                    output.println("""{"status":"ok","version":"3.0","ai_enabled":$hasAI,"script_enabled":$hasScript,"script_count":$scriptCount,"features":["DUMP","ANALYZE","SET_API_KEY","RUN_AI_GOAL","STOP_AI","SCRIPT_GENERATE","SCRIPT_EXECUTE","SCRIPT_EXECUTE_AUTO","SCRIPT_IMPROVE","SCRIPT_GET","SCRIPT_LIST","SCRIPT_DELETE"]}""")
                 }
                 else -> {
-                    output.println("""{"error":"UNKNOWN_COMMAND","message":"Unknown command: $command","supported":["DUMP","ANALYZE","GENERATE_SCRIPT:goal","SET_API_KEY:key","RUN_AI_GOAL:goal","STOP_AI","STATUS"]}""")
+                    output.println("""{"error":"UNKNOWN_COMMAND","message":"Unknown command: $command","supported":["DUMP","ANALYZE","SET_API_KEY:key","RUN_AI_GOAL:goal","STOP_AI","SCRIPT_GENERATE:goal","SCRIPT_EXECUTE:id","SCRIPT_EXECUTE_AUTO:id","SCRIPT_LIST","SCRIPT_GET:id","SCRIPT_DELETE:id","STATUS"]}""")
                 }
             }
 
@@ -386,5 +427,217 @@ class SocketServer(private val service: AccessibilityService) {
             }
         }
         return data
+    }
+    
+    // ========== 🆕 脚本系统命令处理 ==========
+    
+    /**
+     * 生成脚本
+     */
+    private fun handleScriptGenerate(goal: String, output: PrintWriter, socket: Socket) {
+        val engine = scriptEngine
+        if (engine == null) {
+            output.println("""{"error":"NO_SCRIPT_ENGINE","message":"请先设置 API Key"}""")
+            socket.close()
+            return
+        }
+        
+        output.println("""{"status":"generating","goal":"$goal"}""")
+        output.flush()
+        
+        scope.launch {
+            try {
+                engine.onLog = { log ->
+                    output.println("""{"log":"${escapeJson(log)}"}""")
+                    output.flush()
+                }
+                
+                val result = engine.generateScript(goal)
+                
+                result.fold(
+                    onSuccess = { script ->
+                        output.println("""{"status":"success","script":${gson.toJson(script)}}""")
+                    },
+                    onFailure = { error ->
+                        output.println("""{"status":"error","error":"${escapeJson(error.message ?: "Unknown error")}"}""")
+                    }
+                )
+            } catch (e: Exception) {
+                output.println("""{"status":"error","error":"${escapeJson(e.message ?: "Unknown error")}"}""")
+            } finally {
+                engine.onLog = null
+                socket.close()
+            }
+        }
+    }
+    
+    /**
+     * 执行脚本
+     */
+    private fun handleScriptExecute(scriptId: String, output: PrintWriter, socket: Socket) {
+        val engine = scriptEngine
+        if (engine == null) {
+            output.println("""{"error":"NO_SCRIPT_ENGINE","message":"请先设置 API Key"}""")
+            socket.close()
+            return
+        }
+        
+        output.println("""{"status":"executing","script_id":"$scriptId"}""")
+        output.flush()
+        
+        scope.launch {
+            try {
+                engine.onLog = { log ->
+                    output.println("""{"log":"${escapeJson(log)}"}""")
+                    output.flush()
+                }
+                
+                val result = engine.executeScript(scriptId) { step, total, desc ->
+                    output.println("""{"progress":{"step":$step,"total":$total,"description":"${escapeJson(desc)}"}}""")
+                    output.flush()
+                }
+                
+                output.println("""{"status":"complete","result":${gson.toJson(result)}}""")
+            } catch (e: Exception) {
+                output.println("""{"status":"error","error":"${escapeJson(e.message ?: "Unknown error")}"}""")
+            } finally {
+                engine.onLog = null
+                socket.close()
+            }
+        }
+    }
+    
+    /**
+     * 执行脚本（自动改进模式）
+     */
+    private fun handleScriptExecuteAuto(scriptId: String, output: PrintWriter, socket: Socket) {
+        val engine = scriptEngine
+        if (engine == null) {
+            output.println("""{"error":"NO_SCRIPT_ENGINE","message":"请先设置 API Key"}""")
+            socket.close()
+            return
+        }
+        
+        output.println("""{"status":"executing_auto","script_id":"$scriptId"}""")
+        output.flush()
+        
+        scope.launch {
+            try {
+                engine.onLog = { log ->
+                    output.println("""{"log":"${escapeJson(log)}"}""")
+                    output.flush()
+                }
+                
+                val result = engine.executeWithAutoImprove(scriptId) { step, total, desc ->
+                    output.println("""{"progress":{"step":$step,"total":$total,"description":"${escapeJson(desc)}"}}""")
+                    output.flush()
+                }
+                
+                output.println("""{"status":"complete","result":${gson.toJson(result)}}""")
+            } catch (e: Exception) {
+                output.println("""{"status":"error","error":"${escapeJson(e.message ?: "Unknown error")}"}""")
+            } finally {
+                engine.onLog = null
+                socket.close()
+            }
+        }
+    }
+    
+    /**
+     * 手动改进脚本
+     */
+    private fun handleScriptImprove(scriptId: String, output: PrintWriter) {
+        val engine = scriptEngine
+        if (engine == null) {
+            output.println("""{"error":"NO_SCRIPT_ENGINE","message":"请先设置 API Key"}""")
+            return
+        }
+        
+        val script = engine.loadScript(scriptId)
+        if (script == null) {
+            output.println("""{"error":"SCRIPT_NOT_FOUND","message":"脚本不存在: $scriptId"}""")
+            return
+        }
+        
+        // 创建一个模拟的失败结果用于改进
+        val mockFailResult = com.employee.agent.domain.script.ScriptExecutionResult(
+            success = false,
+            stepsExecuted = 0,
+            totalSteps = script.steps.size,
+            error = "手动触发改进",
+            logs = listOf("用户请求改进脚本")
+        )
+        
+        scope.launch {
+            val improvedScript = engine.improveScript(script, mockFailResult)
+            if (improvedScript != null) {
+                engine.saveScript(improvedScript)
+                output.println("""{"status":"improved","script":${gson.toJson(improvedScript)}}""")
+            } else {
+                output.println("""{"status":"no_improvement","message":"AI 未提供改进建议"}""")
+            }
+        }
+    }
+    
+    /**
+     * 获取脚本详情
+     */
+    private fun handleScriptGet(scriptId: String, output: PrintWriter) {
+        val engine = scriptEngine
+        if (engine == null) {
+            output.println("""{"error":"NO_SCRIPT_ENGINE","message":"请先设置 API Key"}""")
+            return
+        }
+        
+        val script = engine.loadScript(scriptId)
+        if (script != null) {
+            output.println(gson.toJson(script))
+        } else {
+            output.println("""{"error":"SCRIPT_NOT_FOUND","message":"脚本不存在: $scriptId"}""")
+        }
+    }
+    
+    /**
+     * 列出所有脚本
+     */
+    private fun handleScriptList(output: PrintWriter) {
+        val engine = scriptEngine
+        if (engine == null) {
+            output.println("""{"error":"NO_SCRIPT_ENGINE","message":"请先设置 API Key"}""")
+            return
+        }
+        
+        val scripts = engine.listScripts()
+        val summaries = scripts.map { script ->
+            mapOf(
+                "id" to script.id,
+                "name" to script.name,
+                "goal" to script.goal,
+                "version" to script.version,
+                "steps_count" to script.steps.size,
+                "success_count" to script.successCount,
+                "fail_count" to script.failCount,
+                "created_at" to script.createdAt
+            )
+        }
+        output.println(gson.toJson(summaries))
+    }
+    
+    /**
+     * 删除脚本
+     */
+    private fun handleScriptDelete(scriptId: String, output: PrintWriter) {
+        val engine = scriptEngine
+        if (engine == null) {
+            output.println("""{"error":"NO_SCRIPT_ENGINE","message":"请先设置 API Key"}""")
+            return
+        }
+        
+        val success = engine.deleteScript(scriptId)
+        if (success) {
+            output.println("""{"status":"deleted","script_id":"$scriptId"}""")
+        } else {
+            output.println("""{"error":"DELETE_FAILED","message":"删除失败: $scriptId"}""")
+        }
     }
 }
