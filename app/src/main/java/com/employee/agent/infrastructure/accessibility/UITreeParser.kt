@@ -16,8 +16,22 @@ class UITreeParser(
 ) : ScreenReader {
     
     override suspend fun readCurrentScreen(): UINode {
+        return readCurrentScreenSync()
+    }
+    
+    /**
+     * 同步版本（内部使用）
+     */
+    fun readCurrentScreenSync(): UINode {
         val root = service.rootInActiveWindow
-            ?: throw IllegalStateException("无法获取屏幕根节点")
+            ?: return UINode(
+                className = "Empty",
+                text = "无法获取屏幕根节点",
+                contentDescription = null,
+                resourceId = null,
+                bounds = Rect(),
+                children = emptyList()
+            )
         
         return try {
             parseNode(root)

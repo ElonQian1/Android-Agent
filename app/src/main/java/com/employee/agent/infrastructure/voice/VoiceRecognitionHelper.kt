@@ -73,6 +73,10 @@ class VoiceRecognitionHelper(private val context: Context) {
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             // 语音输入提示
             putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出你的任务目标...")
+            // 🆕 延长静音等待时间（毫秒）- 让用户说完整句话
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 2000L)
         }
         
         try {

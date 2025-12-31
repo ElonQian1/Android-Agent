@@ -1,6 +1,6 @@
 // infrastructure/floating/FloatingVoiceActivity.kt
 // module: infrastructure/floating | layer: infrastructure | role: voice-input-activity
-// summary: 语音输入透明Activity - 从悬浮球单击触发
+// summary: 语音输入透明Activity - 使用AI意图分析判断是否说完
 
 package com.employee.agent.infrastructure.floating
 
@@ -10,8 +10,11 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.WindowManager
+import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -19,12 +22,18 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.employee.agent.AgentConfigActivity
+import com.employee.agent.application.IntentAnalyzer
 import com.employee.agent.infrastructure.voice.VoiceRecognitionHelper
+import kotlinx.coroutines.*
 
 /**
  * 🎤 语音输入透明Activity
  * 
- * 从悬浮球单击触发，显示语音输入界面
+ * 使用 AI 意图分析判断用户是否说完：
+ * - 语音停顿后调用意图分析
+ * - 如果 isComplete=false，提示"继续说..."
+ * - 如果 isComplete=true，自动执行
  */
 class FloatingVoiceActivity : AppCompatActivity() {
     
@@ -32,6 +41,20 @@ class FloatingVoiceActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var resultText: TextView
     private lateinit var voiceIndicator: TextView
+    private lateinit var cancelButton: Button
+    
+    private val handler = Handler(Looper.getMainLooper())
+    private val scope = CoroutineScope(Dispatchers.Main + Job())
+    
+    // 累积的识别文本
+    private var accumulatedText: StringBuilder = StringBuilder()
+    
+    // 最大续录次数
+    private val maxContinueCount = 3
+    private var continueCount = 0
+    
+    // 轻量级意图分析器
+    private var intentAnalyzer: IntentAnalyzer? = null
     
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -57,6 +80,12 @@ class FloatingVoiceActivity : AppCompatActivity() {
         // 初始化语音助手
         voiceHelper = VoiceRecognitionHelper(this)
         
+        // 初始化意图分析器
+        val apiKey = AgentConfigActivity.getApiKey(this)
+        if (apiKey.isNotEmpty()) {
+            intentAnalyzer = IntentAnalyzer(apiKey)
+        }
+        
         // 创建UI
         createUI()
         
@@ -69,7 +98,7 @@ class FloatingVoiceActivity : AppCompatActivity() {
         
         val rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.TRANSPARENT)
-            setOnClickListener { finish() }  // 点击背景关闭
+            setOnClickListener { cancelAndClose() }
         }
         
         // 中央卡片
@@ -78,9 +107,9 @@ class FloatingVoiceActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             setPadding(
                 (32 * density).toInt(),
-                (40 * density).toInt(),
                 (32 * density).toInt(),
-                (40 * density).toInt()
+                (32 * density).toInt(),
+                (24 * density).toInt()
             )
             
             val bg = GradientDrawable().apply {
@@ -89,28 +118,24 @@ class FloatingVoiceActivity : AppCompatActivity() {
             }
             background = bg
             elevation = 16 * density
-            
-            // 阻止点击穿透
             setOnClickListener { }
         }
         
         // 语音指示器
         voiceIndicator = TextView(this).apply {
             text = "🎤"
-            textSize = 64f
+            textSize = 56f
             gravity = Gravity.CENTER
         }
         card.addView(voiceIndicator, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.CENTER
-        })
+        ).apply { gravity = Gravity.CENTER })
         
         // 状态文字
         statusText = TextView(this).apply {
             text = "正在准备..."
-            textSize = 18f
+            textSize = 16f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
         }
@@ -119,30 +144,52 @@ class FloatingVoiceActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.CENTER
-            topMargin = (16 * density).toInt()
+            topMargin = (12 * density).toInt()
         })
         
         // 识别结果
         resultText = TextView(this).apply {
             text = ""
-            textSize = 16f
-            setTextColor(Color.parseColor("#AAAAAA"))
+            textSize = 18f
+            setTextColor(Color.parseColor("#4FC3F7"))
             gravity = Gravity.CENTER
-            maxLines = 3
+            maxLines = 5
+            minHeight = (60 * density).toInt()
         }
         card.addView(resultText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.CENTER
+            topMargin = (16 * density).toInt()
+        })
+        
+        // 取消按钮
+        cancelButton = Button(this).apply {
+            text = "❌ 取消"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            val bg = GradientDrawable().apply {
+                setColor(Color.parseColor("#666666"))
+                cornerRadius = 20 * density
+            }
+            background = bg
+            setPadding((24 * density).toInt(), (10 * density).toInt(), (24 * density).toInt(), (10 * density).toInt())
+            setOnClickListener { cancelAndClose() }
+        }
+        card.addView(cancelButton, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.CENTER
-            topMargin = (12 * density).toInt()
+            topMargin = (20 * density).toInt()
         })
         
         // 提示
         val tipText = TextView(this).apply {
-            text = "点击空白处取消"
-            textSize = 12f
-            setTextColor(Color.parseColor("#666666"))
+            text = "说完会自动执行，点击空白处取消"
+            textSize = 11f
+            setTextColor(Color.parseColor("#888888"))
             gravity = Gravity.CENTER
         }
         card.addView(tipText, LinearLayout.LayoutParams(
@@ -150,18 +197,22 @@ class FloatingVoiceActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.CENTER
-            topMargin = (24 * density).toInt()
+            topMargin = (12 * density).toInt()
         })
         
-        // 添加卡片到根布局
         rootLayout.addView(card, FrameLayout.LayoutParams(
-            (300 * density).toInt(),
+            (320 * density).toInt(),
             FrameLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.CENTER
-        })
+        ).apply { gravity = Gravity.CENTER })
         
         setContentView(rootLayout)
+    }
+    
+    private fun cancelAndClose() {
+        voiceHelper.stopListening()
+        handler.removeCallbacksAndMessages(null)
+        scope.cancel()
+        finish()
     }
     
     private fun checkPermissionAndStart() {
@@ -178,11 +229,14 @@ class FloatingVoiceActivity : AppCompatActivity() {
     }
     
     private fun startListening() {
+        statusText.text = "请说话..."
+        voiceIndicator.text = "🔴"
+        
         voiceHelper.apply {
             onListeningStateChanged = { isListening ->
                 runOnUiThread {
                     if (isListening) {
-                        statusText.text = "请说出您的任务..."
+                        statusText.text = "正在聆听..."
                         voiceIndicator.text = "🔴"
                     }
                 }
@@ -190,33 +244,31 @@ class FloatingVoiceActivity : AppCompatActivity() {
             
             onPartialResult = { partial ->
                 runOnUiThread {
-                    resultText.text = partial
+                    val display = if (accumulatedText.isNotEmpty()) {
+                        accumulatedText.toString() + partial
+                    } else {
+                        partial
+                    }
+                    resultText.text = display
                 }
             }
             
             onResult = { result ->
                 runOnUiThread {
-                    statusText.text = "识别成功"
-                    resultText.text = result
-                    
-                    // 提交任务
-                    if (result.isNotBlank()) {
-                        submitTask(result)
-                    } else {
-                        Toast.makeText(this@FloatingVoiceActivity, "未识别到内容", Toast.LENGTH_SHORT).show()
-                        finish()
-                    }
+                    handleRecognitionResult(result)
                 }
             }
             
             onError = { error ->
                 runOnUiThread {
-                    statusText.text = "识别失败"
-                    resultText.text = error
-                    voiceIndicator.text = "❌"
-                    
-                    // 延迟关闭
-                    resultText.postDelayed({ finish() }, 1500)
+                    if (accumulatedText.isNotEmpty()) {
+                        // 有内容就直接提交
+                        submitTask(accumulatedText.toString())
+                    } else {
+                        statusText.text = "识别出错: $error"
+                        voiceIndicator.text = "❌"
+                        handler.postDelayed({ finish() }, 1500)
+                    }
                 }
             }
         }
@@ -224,25 +276,88 @@ class FloatingVoiceActivity : AppCompatActivity() {
         voiceHelper.startListening()
     }
     
+    /**
+     * 处理识别结果，调用意图分析判断是否说完
+     */
+    private fun handleRecognitionResult(result: String) {
+        if (result.isBlank()) {
+            if (accumulatedText.isNotEmpty()) {
+                // 空结果但有累积内容，直接提交
+                submitTask(accumulatedText.toString())
+            } else {
+                statusText.text = "没听清，请再说一遍..."
+                voiceIndicator.text = "🎤"
+                handler.postDelayed({ startListening() }, 500)
+            }
+            return
+        }
+        
+        // 累加结果
+        accumulatedText.append(result)
+        val fullText = accumulatedText.toString()
+        resultText.text = fullText
+        
+        // 检查是否有分析器
+        val analyzer = intentAnalyzer
+        if (analyzer == null) {
+            // 没有分析器，直接执行
+            submitTask(fullText)
+            return
+        }
+        
+        // 调用意图分析判断是否完整
+        statusText.text = "分析中..."
+        voiceIndicator.text = "🧠"
+        
+        scope.launch {
+            try {
+                val analysisResult = analyzer.analyze(fullText)
+                
+                if (analysisResult.isComplete) {
+                    // 表述完整，自动执行
+                    statusText.text = "正在执行..."
+                    voiceIndicator.text = "🚀"
+                    handler.postDelayed({
+                        submitTask(analysisResult.goal)
+                    }, 200)
+                } else {
+                    // 表述不完整，继续录音
+                    continueCount++
+                    if (continueCount < maxContinueCount) {
+                        statusText.text = "继续说..."
+                        voiceIndicator.text = "🟡"
+                        handler.postDelayed({ startListening() }, 600)
+                    } else {
+                        // 续录次数用完，直接提交
+                        submitTask(fullText)
+                    }
+                }
+            } catch (e: Exception) {
+                // 分析失败，直接提交
+                submitTask(fullText)
+            }
+        }
+    }
+    
     private fun submitTask(goal: String) {
-        // 检查无障碍服务是否运行
+        handler.removeCallbacksAndMessages(null)
+        voiceHelper.stopListening()
+        
         if (!com.employee.agent.AgentService.isRunning()) {
             Toast.makeText(this, "❌ 请先开启无障碍服务", Toast.LENGTH_LONG).show()
             finish()
             return
         }
         
-        // 直接调用 AgentService 执行任务
         com.employee.agent.AgentService.executeTask(goal)
-        
-        Toast.makeText(this, "🚀 任务已提交: $goal", Toast.LENGTH_SHORT).show()
-        
-        // 延迟关闭
-        resultText.postDelayed({ finish() }, 500)
+        Toast.makeText(this, "🚀 $goal", Toast.LENGTH_SHORT).show()
+        finish()
     }
     
     override fun onDestroy() {
         super.onDestroy()
+        handler.removeCallbacksAndMessages(null)
+        scope.cancel()
         voiceHelper.destroy()
     }
 }

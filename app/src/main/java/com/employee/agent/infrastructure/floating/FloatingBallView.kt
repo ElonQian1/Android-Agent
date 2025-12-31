@@ -1,17 +1,22 @@
 // infrastructure/floating/FloatingBallView.kt
 // module: infrastructure/floating | layer: infrastructure | role: floating-ball-view
-// summary: 悬浮球视图 - 可拖拽、支持单击/双击检测、状态动画
+// summary: 悬浮球视图 - 可拖拽、支持单击/双击检测、状态动画、玻璃拟态设计
 
 package com.employee.agent.infrastructure.floating
 
+import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -19,19 +24,23 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.LinearInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
 import kotlin.math.abs
 
 /**
- * 🎈 悬浮球视图
+ * 🎈 悬浮球视图 - 玻璃拟态设计
  * 
  * 功能：
  * - 可拖拽移动
  * - 单击检测 -> 语音输入
  * - 双击检测 -> 文字输入
  * - 状态动画（空闲/执行中/错误）
+ * - 玻璃拟态 + 光晕效果
  */
 @SuppressLint("ViewConstructor")
 class FloatingBallView(context: Context) : FrameLayout(context) {
@@ -40,12 +49,23 @@ class FloatingBallView(context: Context) : FrameLayout(context) {
         private const val TAG = "FloatingBallView"
         
         // 尺寸
-        private const val BALL_SIZE = 120  // dp -> px 会在代码中转换
+        private const val BALL_SIZE = 56  // 更紧凑的尺寸 (dp)
+        private const val OUTER_GLOW_SIZE = 72  // 外发光尺寸 (dp)
         
         // 点击检测
         private const val CLICK_THRESHOLD = 15  // 移动阈值，小于此值视为点击
         private const val DOUBLE_CLICK_TIMEOUT = 300L  // 双击间隔
         private const val LONG_PRESS_TIMEOUT = 500L    // 长按超时
+        
+        // 颜色主题
+        private val COLOR_IDLE_START = Color.parseColor("#667eea")      // 紫蓝渐变起点
+        private val COLOR_IDLE_END = Color.parseColor("#764ba2")        // 紫蓝渐变终点
+        private val COLOR_LISTENING_START = Color.parseColor("#11998e") // 青绿渐变
+        private val COLOR_LISTENING_END = Color.parseColor("#38ef7d")
+        private val COLOR_EXECUTING_START = Color.parseColor("#4facfe") // 天蓝渐变
+        private val COLOR_EXECUTING_END = Color.parseColor("#00f2fe")
+        private val COLOR_ERROR_START = Color.parseColor("#ff416c")     // 红粉渐变
+        private val COLOR_ERROR_END = Color.parseColor("#ff4b2b")
     }
     
     // 回调
@@ -53,8 +73,11 @@ class FloatingBallView(context: Context) : FrameLayout(context) {
     var onDoubleClick: (() -> Unit)? = null
     
     // 视图组件
-    private val ballView: TextView
-    private val pulseView: View
+    private val outerGlowView: View        // 外发光层
+    private val innerGlowView: View        // 内发光层
+    private val ballView: View             // 主球体
+    private val iconView: TextView         // 图标层
+    private val highlightView: View        // 高光层
     
     // 触摸状态
     private var initialX = 0
@@ -71,6 +94,8 @@ class FloatingBallView(context: Context) : FrameLayout(context) {
     // 动画
     private var rotationAnimator: ObjectAnimator? = null
     private var pulseAnimator: ValueAnimator? = null
+    private var breatheAnimator: AnimatorSet? = null
+    private var glowAnimator: ValueAnimator? = null
     
     // 当前状态
     private var currentState = FloatingBallState.IDLE
@@ -78,45 +103,106 @@ class FloatingBallView(context: Context) : FrameLayout(context) {
     init {
         val density = context.resources.displayMetrics.density
         val ballSizePx = (BALL_SIZE * density).toInt()
+        val outerGlowSizePx = (OUTER_GLOW_SIZE * density).toInt()
         
-        // 创建脉冲背景（用于监听状态动画）
-        pulseView = View(context).apply {
+        // === 1. 外发光层 (最底层) ===
+        outerGlowView = View(context).apply {
             val bg = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#4A90D9"))
+                setColor(Color.TRANSPARENT)
+                // 使用渐变模拟发光效果
+                colors = intArrayOf(
+                    Color.parseColor("#40667eea"),  // 半透明紫色
+                    Color.parseColor("#00667eea")   // 完全透明
+                )
+                gradientType = GradientDrawable.RADIAL_GRADIENT
+                gradientRadius = outerGlowSizePx / 2f
             }
             background = bg
-            alpha = 0f
+            alpha = 0.6f
         }
-        addView(pulseView, LayoutParams(ballSizePx, ballSizePx).apply {
+        addView(outerGlowView, LayoutParams(outerGlowSizePx, outerGlowSizePx).apply {
             gravity = Gravity.CENTER
         })
         
-        // 创建球体
-        ballView = TextView(context).apply {
+        // === 2. 内发光层 ===
+        innerGlowView = View(context).apply {
             val bg = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#4CAF50"))  // 默认绿色
-                setStroke((2 * density).toInt(), Color.WHITE)
+                colors = intArrayOf(
+                    Color.parseColor("#50667eea"),
+                    Color.parseColor("#20764ba2")
+                )
+                gradientType = GradientDrawable.RADIAL_GRADIENT
+                gradientRadius = ballSizePx * 0.6f
             }
             background = bg
-            
-            text = "🤖"
-            textSize = 28f
+            alpha = 0.8f
+        }
+        val innerGlowSize = (ballSizePx * 1.15f).toInt()
+        addView(innerGlowView, LayoutParams(innerGlowSize, innerGlowSize).apply {
             gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            
-            // 阴影效果
-            elevation = 8 * density
+        })
+        
+        // === 3. 主球体 (玻璃拟态) ===
+        ballView = View(context).apply {
+            val bg = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                // 渐变背景
+                colors = intArrayOf(COLOR_IDLE_START, COLOR_IDLE_END)
+                orientation = GradientDrawable.Orientation.TL_BR
+                // 细边框
+                setStroke((1.5f * density).toInt(), Color.parseColor("#40FFFFFF"))
+            }
+            background = bg
+            elevation = 12 * density  // 增强阴影
         }
         addView(ballView, LayoutParams(ballSizePx, ballSizePx).apply {
             gravity = Gravity.CENTER
         })
         
+        // === 4. 高光层 (玻璃反光效果) ===
+        highlightView = View(context).apply {
+            val bg = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                colors = intArrayOf(
+                    Color.parseColor("#50FFFFFF"),  // 顶部高亮
+                    Color.parseColor("#00FFFFFF")   // 底部透明
+                )
+                orientation = GradientDrawable.Orientation.TOP_BOTTOM
+            }
+            background = bg
+        }
+        val highlightSize = (ballSizePx * 0.85f).toInt()
+        val highlightOffset = -(ballSizePx * 0.08f).toInt()
+        addView(highlightView, LayoutParams(highlightSize, (highlightSize * 0.5f).toInt()).apply {
+            gravity = Gravity.CENTER_HORIZONTAL or Gravity.TOP
+            topMargin = ((outerGlowSizePx - ballSizePx) / 2) + (ballSizePx * 0.08f).toInt()
+        })
+        
+        // === 5. 图标层 (最上层) ===
+        iconView = TextView(context).apply {
+            text = "✨"  // 默认空闲状态图标
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            // 添加文字阴影增强立体感
+            setShadowLayer(4f, 0f, 2f, Color.parseColor("#40000000"))
+        }
+        addView(iconView, LayoutParams(ballSizePx, ballSizePx).apply {
+            gravity = Gravity.CENTER
+        })
+        
+        // 设置整体布局尺寸
+        layoutParams = LayoutParams(outerGlowSizePx, outerGlowSizePx)
+        
         // 设置触摸监听
         setupTouchListener()
         
-        Log.i(TAG, "悬浮球视图已创建")
+        // 启动呼吸动画
+        startBreatheAnimation()
+        
+        Log.i(TAG, "悬浮球视图已创建 (玻璃拟态设计)")
     }
     
     @SuppressLint("ClickableViewAccessibility")
@@ -205,56 +291,130 @@ class FloatingBallView(context: Context) : FrameLayout(context) {
             
             when (state) {
                 FloatingBallState.IDLE -> {
-                    setColor("#4CAF50")  // 绿色
-                    ballView.text = "🤖"
+                    setGradientColors(COLOR_IDLE_START, COLOR_IDLE_END)
+                    setGlowColor("#667eea")
+                    iconView.text = "✨"
+                    startBreatheAnimation()
                 }
                 
                 FloatingBallState.LISTENING -> {
-                    setColor("#2196F3")  // 蓝色
-                    ballView.text = "🎤"
+                    setGradientColors(COLOR_LISTENING_START, COLOR_LISTENING_END)
+                    setGlowColor("#11998e")
+                    iconView.text = "🎙️"
                     startPulseAnimation()
+                    startGlowAnimation()
                 }
                 
                 FloatingBallState.EXECUTING -> {
-                    setColor("#2196F3")  // 蓝色
-                    ballView.text = "⚙️"
+                    setGradientColors(COLOR_EXECUTING_START, COLOR_EXECUTING_END)
+                    setGlowColor("#4facfe")
+                    iconView.text = "⚡"
                     startRotationAnimation()
+                    startGlowAnimation()
                 }
                 
                 FloatingBallState.ERROR -> {
-                    setColor("#F44336")  // 红色
-                    ballView.text = "❌"
+                    setGradientColors(COLOR_ERROR_START, COLOR_ERROR_END)
+                    setGlowColor("#ff416c")
+                    iconView.text = "⚠️"
+                    startShakeAnimation()
                 }
             }
         }
     }
     
-    private fun setColor(colorHex: String) {
+    private fun setGradientColors(startColor: Int, endColor: Int) {
         val bg = ballView.background as? GradientDrawable
-        bg?.setColor(Color.parseColor(colorHex))
+        bg?.colors = intArrayOf(startColor, endColor)
     }
     
-    // ==================== 动画 ====================
+    private fun setGlowColor(colorHex: String) {
+        val color = Color.parseColor(colorHex)
+        
+        // 更新外发光
+        val outerBg = outerGlowView.background as? GradientDrawable
+        outerBg?.colors = intArrayOf(
+            Color.argb(64, Color.red(color), Color.green(color), Color.blue(color)),
+            Color.argb(0, Color.red(color), Color.green(color), Color.blue(color))
+        )
+        
+        // 更新内发光
+        val innerBg = innerGlowView.background as? GradientDrawable
+        innerBg?.colors = intArrayOf(
+            Color.argb(80, Color.red(color), Color.green(color), Color.blue(color)),
+            Color.argb(32, Color.red(color), Color.green(color), Color.blue(color))
+        )
+    }
     
+    // ==================== 动画效果 ====================
+    
+    /** 呼吸动画 - 空闲状态 */
+    private fun startBreatheAnimation() {
+        breatheAnimator = AnimatorSet().apply {
+            val scaleX = ObjectAnimator.ofFloat(ballView, "scaleX", 1f, 1.05f, 1f)
+            val scaleY = ObjectAnimator.ofFloat(ballView, "scaleY", 1f, 1.05f, 1f)
+            val alpha = ObjectAnimator.ofFloat(outerGlowView, "alpha", 0.4f, 0.7f, 0.4f)
+            
+            playTogether(scaleX, scaleY, alpha)
+            duration = 2500
+            interpolator = AccelerateDecelerateInterpolator()
+            
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (currentState == FloatingBallState.IDLE) {
+                        start()
+                    }
+                }
+            })
+            start()
+        }
+    }
+    
+    /** 旋转动画 - 执行中状态 */
     private fun startRotationAnimation() {
-        rotationAnimator = ObjectAnimator.ofFloat(ballView, "rotation", 0f, 360f).apply {
-            duration = 1500
+        rotationAnimator = ObjectAnimator.ofFloat(iconView, "rotation", 0f, 360f).apply {
+            duration = 1200
             repeatCount = ValueAnimator.INFINITE
             interpolator = LinearInterpolator()
             start()
         }
     }
     
+    /** 脉冲动画 - 监听状态 */
     private fun startPulseAnimation() {
-        pulseAnimator = ValueAnimator.ofFloat(0.3f, 0.8f).apply {
+        pulseAnimator = ValueAnimator.ofFloat(1f, 1.2f).apply {
+            duration = 600
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+            addUpdateListener { 
+                val scale = it.animatedValue as Float
+                innerGlowView.scaleX = scale
+                innerGlowView.scaleY = scale
+                innerGlowView.alpha = 1.5f - scale  // 放大时变淡
+            }
+            start()
+        }
+    }
+    
+    /** 发光动画 - 活跃状态 */
+    private fun startGlowAnimation() {
+        glowAnimator = ValueAnimator.ofFloat(0.5f, 1f).apply {
             duration = 800
             repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE
-            addUpdateListener { 
-                pulseView.alpha = it.animatedValue as Float
-                pulseView.scaleX = 1f + (it.animatedValue as Float) * 0.3f
-                pulseView.scaleY = 1f + (it.animatedValue as Float) * 0.3f
+            addUpdateListener {
+                outerGlowView.alpha = it.animatedValue as Float
             }
+            start()
+        }
+    }
+    
+    /** 抖动动画 - 错误状态 */
+    private fun startShakeAnimation() {
+        ObjectAnimator.ofFloat(ballView, "translationX", 0f, -10f, 10f, -10f, 10f, -5f, 5f, 0f).apply {
+            duration = 500
+            interpolator = LinearInterpolator()
             start()
         }
     }
@@ -262,13 +422,22 @@ class FloatingBallView(context: Context) : FrameLayout(context) {
     private fun stopAllAnimations() {
         rotationAnimator?.cancel()
         rotationAnimator = null
-        ballView.rotation = 0f
+        iconView.rotation = 0f
         
         pulseAnimator?.cancel()
         pulseAnimator = null
-        pulseView.alpha = 0f
-        pulseView.scaleX = 1f
-        pulseView.scaleY = 1f
+        innerGlowView.scaleX = 1f
+        innerGlowView.scaleY = 1f
+        innerGlowView.alpha = 0.8f
+        
+        breatheAnimator?.cancel()
+        breatheAnimator = null
+        ballView.scaleX = 1f
+        ballView.scaleY = 1f
+        
+        glowAnimator?.cancel()
+        glowAnimator = null
+        outerGlowView.alpha = 0.6f
     }
     
     override fun onDetachedFromWindow() {

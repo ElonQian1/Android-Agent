@@ -1,5 +1,6 @@
 package com.employee.agent
 
+import android.accessibilityservice.AccessibilityButtonController
 import android.accessibilityservice.AccessibilityService
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -11,11 +12,14 @@ import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.employee.agent.application.ScriptEngine
 import com.employee.agent.infrastructure.NotificationActionReceiver
 import com.employee.agent.infrastructure.accessibility.*
+import com.employee.agent.infrastructure.floating.FloatingVoiceActivity
+import com.employee.agent.infrastructure.floating.FloatingInputActivity
 import kotlinx.coroutines.*
 
 /**
@@ -35,10 +39,21 @@ class AgentService : AccessibilityService() {
     private lateinit var uiParser: UITreeParser
     private lateinit var screenReader: AccessibilityScreenReader
     
+    // 🆕 智能屏幕读取器（支持三种模式）
+    var smartScreenReader: SmartScreenReader? = null
+        private set
+    
+    // 🆕 系统无障碍按钮控制器
+    private var accessibilityButtonController: AccessibilityButtonController? = null
+    private var accessibilityButtonCallback: AccessibilityButtonController.AccessibilityButtonCallback? = null
+    
     companion object {
         const val NOTIFICATION_ID = 1001
         const val CHANNEL_ID = "agent_service_channel"
         private const val TAG = "AgentService"
+        
+        // 🆕 配置开关：是否启用自定义悬浮窗（默认不启用，使用系统无障碍按钮）
+        var useCustomFloatingWindow: Boolean = false
         
         // 静态实例，供悬浮球等组件调用
         @Volatile
@@ -75,12 +90,135 @@ class AgentService : AccessibilityService() {
         // 初始化核心组件
         initializeCoreComponents()
         
+        // 🆕 初始化智能屏幕读取器（支持三种模式）
+        smartScreenReader = SmartScreenReader(this)
+        Log.i(TAG, "✅ SmartScreenReader 初始化完成")
+        
+        // 🆕 初始化系统无障碍按钮（Android 8.0+）
+        setupSystemAccessibilityButton()
+        
         // 启动 Socket 服务器（PC 通信）
         socketServer = SocketServer(this)
         socketServer?.loadSavedApiKey()  // 🆕 自动加载保存的 API Key
         socketServer?.start(11451)
         
         Log.i(TAG, "✅ Agent 服务已启动，等待 PC 端连接")
+    }
+    
+    /**
+     * 🆕 设置系统无障碍按钮（悬浮快捷方式）
+     * 
+     * 这是 Android 8.0+ 原生功能，无需悬浮窗权限
+     * 用户可在 设置 → 无障碍 → 快捷方式 中配置触发方式
+     */
+    private fun setupSystemAccessibilityButton() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                // 从父类 AccessibilityService 获取控制器
+                val controller = accessibilityButtonController
+                accessibilityButtonController = controller
+                
+                if (controller == null) {
+                    Log.w(TAG, "⚠️ 无障碍按钮控制器不可用（可能未在快捷方式中选择本服务）")
+                    return
+                }
+                
+                // 检查按钮是否可用
+                val isAvailable = controller.isAccessibilityButtonAvailable
+                Log.i(TAG, "🔘 无障碍按钮可用性: $isAvailable")
+                
+                accessibilityButtonCallback = object : AccessibilityButtonController.AccessibilityButtonCallback() {
+                    override fun onClicked(controller: AccessibilityButtonController) {
+                        Log.i(TAG, "🔘 系统无障碍按钮被点击")
+                        onSystemAccessibilityButtonClicked()
+                    }
+                    
+                    override fun onAvailabilityChanged(controller: AccessibilityButtonController, available: Boolean) {
+                        Log.i(TAG, "🔘 系统无障碍按钮可用性变化: $available")
+                    }
+                }
+                
+                controller.registerAccessibilityButtonCallback(accessibilityButtonCallback!!)
+                Log.i(TAG, "✅ 系统无障碍按钮回调已注册")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ 注册系统无障碍按钮失败", e)
+            }
+        } else {
+            Log.w(TAG, "⚠️ Android 8.0 以下不支持系统无障碍按钮")
+        }
+    }
+    
+    /**
+     * 显示语音输入界面
+     */
+    private fun showVoiceInput() {
+        try {
+            val intent = Intent(this, FloatingVoiceActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "打开语音输入失败", e)
+        }
+    }
+    
+    /**
+     * 显示文字输入界面
+     */
+    private fun showTextInput() {
+        try {
+            val intent = Intent(this, FloatingInputActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "打开文字输入失败", e)
+        }
+    }
+    
+    /**
+     * 打开主界面
+     */
+    private fun openMainActivity() {
+        try {
+            val intent = Intent(this, AgentExecuteActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "打开主界面失败", e)
+        }
+    }
+    
+    /**
+     * 🆕 系统无障碍按钮点击回调
+     * 
+     * 点击后打开任务输入界面
+     */
+    private fun onSystemAccessibilityButtonClicked() {
+        try {
+            // 打开任务执行界面
+            val intent = Intent(this, AgentExecuteActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            startActivity(intent)
+            
+            // 震动反馈
+            val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator?.vibrate(android.os.VibrationEffect.createOneShot(50, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator?.vibrate(50)
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ 打开任务界面失败", e)
+            Toast.makeText(this, "打开界面失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
     
     /**
@@ -127,7 +265,14 @@ class AgentService : AccessibilityService() {
         
         // 创建增强通知
         val notification = createEnhancedNotification()
-        startForeground(NOTIFICATION_ID, notification)
+        
+        // Android 14+ 需要指定前台服务类型
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, 
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         
         // 注册本地广播接收器（用于 Activity 通信）
         registerLocalBroadcastReceivers()
@@ -156,32 +301,40 @@ class AgentService : AccessibilityService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         
-        // 快捷任务：热门笔记
-        val hotIntent = Intent(this, NotificationActionReceiver::class.java).apply {
-            action = NotificationActionReceiver.ACTION_QUICK_TASK
-            putExtra("task", NotificationActionReceiver.TASK_HOT_NOTES)
+        // 🆕 语音输入（最方便！）
+        val voiceIntent = Intent(this, NotificationActionReceiver::class.java).apply {
+            action = NotificationActionReceiver.ACTION_VOICE_INPUT
         }
-        val hotPendingIntent = PendingIntent.getBroadcast(
-            this, 2, hotIntent,
+        val voicePendingIntent = PendingIntent.getBroadcast(
+            this, 3, voiceIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        
+        // 🆕 文字输入
+        val textIntent = Intent(this, NotificationActionReceiver::class.java).apply {
+            action = NotificationActionReceiver.ACTION_TEXT_INPUT
+        }
+        val textPendingIntent = PendingIntent.getBroadcast(
+            this, 4, textIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("🤖 AI Agent 运行中")
-            .setContentText("点击打开 · 下拉查看快捷操作")
+            .setContentText("点击打开 · 下拉使用语音输入")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .setContentIntent(openPendingIntent)
-            // 快捷操作按钮
+            // 🆕 语音输入放第一个（最方便！）
+            .addAction(android.R.drawable.ic_btn_speak_now, "🎤 语音", voicePendingIntent)
+            .addAction(android.R.drawable.ic_menu_edit, "⌨️ 文字", textPendingIntent)
             .addAction(android.R.drawable.ic_menu_send, "📱 小红书", xhsPendingIntent)
-            .addAction(android.R.drawable.ic_menu_search, "🔥 热门", hotPendingIntent)
-            .addAction(android.R.drawable.ic_menu_edit, "✏️ 自定义", openPendingIntent)
             .setStyle(NotificationCompat.BigTextStyle()
                 .bigText("Agent 正在后台待命\n\n" +
-                    "📱 小红书 - 打开小红书应用\n" +
-                    "🔥 热门 - 查找点赞过万的笔记\n" +
-                    "✏️ 自定义 - 输入任意任务"))
+                    "🎤 语音 - 说话即可下达任务（最方便）\n" +
+                    "⌨️ 文字 - 输入文字任务\n" +
+                    "📱 小红书 - 打开小红书应用"))
             .build()
     }
     
@@ -195,7 +348,15 @@ class AgentService : AccessibilityService() {
     private fun registerLocalBroadcastReceivers() {
         val localBroadcastManager = LocalBroadcastManager.getInstance(this)
         
-        // 执行任务广播
+        // 🧠 智能执行广播（先分析意图）
+        localBroadcastManager.registerReceiver(object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val goal = intent?.getStringExtra("goal") ?: return
+                executeSmartly(goal)
+            }
+        }, IntentFilter("agent.smart_execute"))
+        
+        // 执行任务广播（直接执行，跳过意图分析）
         localBroadcastManager.registerReceiver(object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val goal = intent?.getStringExtra("goal") ?: return
@@ -209,6 +370,71 @@ class AgentService : AccessibilityService() {
                 stopCurrentExecution()
             }
         }, IntentFilter("agent.stop"))
+    }
+    
+    /**
+     * 🧠 智能执行（先分析意图）
+     */
+    private fun executeSmartly(userInput: String) {
+        Log.i(TAG, "🧠 智能执行: $userInput")
+        
+        val apiKey = AgentConfigActivity.getApiKey(this)
+        if (apiKey.isEmpty()) {
+            sendLogBroadcast("❌ 请先配置 API Key")
+            sendCompleteBroadcast(false, "未配置 API Key")
+            return
+        }
+        
+        if (scriptEngine == null) {
+            scriptEngine = ScriptEngine(this, apiKey)
+        }
+        
+        currentJob = scope.launch {
+            try {
+                // 第一步：分析意图
+                sendLogBroadcast("🧠 分析用户意图...")
+                val intentResult = scriptEngine?.analyzeIntent(userInput)
+                
+                if (intentResult == null) {
+                    sendLogBroadcast("⚠️ 意图分析失败，尝试直接执行")
+                    executeGoalIndependently(userInput)
+                    return@launch
+                }
+                
+                when (intentResult.intent) {
+                    ScriptEngine.UserIntent.CHAT -> {
+                        // 聊天意图 - 返回 AI 回复
+                        val response = intentResult.chatResponse ?: "我是手机自动化助手，可以帮你操作手机。"
+                        sendLogBroadcast("💬 这是日常对话，AI 回复:")
+                        sendLogBroadcast("💬 $response")
+                        
+                        // 发送聊天回复广播
+                        LocalBroadcastManager.getInstance(this@AgentService).sendBroadcast(
+                            Intent("agent.chat_response")
+                                .putExtra("response", response)
+                        )
+                        sendCompleteBroadcast(true, "")
+                    }
+                    
+                    ScriptEngine.UserIntent.PHONE_OPERATION -> {
+                        // 操作意图 - 执行脚本流程
+                        val goal = intentResult.operationGoal ?: userInput
+                        sendLogBroadcast("🎯 识别为手机操作: $goal")
+                        executeGoalIndependently(goal)
+                    }
+                    
+                    else -> {
+                        // 不确定 - 默认执行
+                        sendLogBroadcast("⚠️ 意图不明确，尝试执行")
+                        executeGoalIndependently(userInput)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "智能执行失败", e)
+                sendLogBroadcast("❌ 智能执行失败: ${e.message}")
+                sendCompleteBroadcast(false, e.message ?: "未知错误")
+            }
+        }
     }
     
     /**
@@ -308,7 +534,8 @@ class AgentService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 可以监听屏幕变化事件
+        // 🆕 转发给智能屏幕读取器（增量模式使用）
+        smartScreenReader?.onAccessibilityEvent(event)
     }
 
     override fun onInterrupt() {
@@ -320,6 +547,14 @@ class AgentService : AccessibilityService() {
         instance = null  // 清除实例
         socketServer?.stop()
         scope.cancel()
+        
+        // 🆕 注销系统无障碍按钮回调
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            accessibilityButtonCallback?.let {
+                accessibilityButtonController?.unregisterAccessibilityButtonCallback(it)
+            }
+        }
+        
         return super.onUnbind(intent)
     }
 }

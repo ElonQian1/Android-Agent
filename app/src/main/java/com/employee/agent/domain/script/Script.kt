@@ -198,5 +198,21 @@ data class ScriptExecutionResult(
     val logs: List<String> = emptyList(),
     
     /** 改进建议（AI生成） */
-    val improvementSuggestions: List<String> = emptyList()
+    val improvementSuggestions: List<String> = emptyList(),
+    
+    /** 🛡️ 清理的弹窗数量（智能模式） */
+    val popupsDismissed: Int = 0,
+    
+    /** 🤖 AI 介入次数 */
+    val aiInterventions: Int = 0
+)
+
+/**
+ * 🛡️ 智能恢复结果
+ */
+data class SmartRecoveryResult(
+    /** 是否恢复成功 */
+    val recovered: Boolean,
+    /** 恢复操作描述 */
+    val action: String
 )

@@ -78,6 +78,14 @@ class AgentExecuteActivity : Activity() {
         }
     }
     
+    // 接收聊天回复的广播（当用户意图是日常聊天而非手机操作时）
+    private val chatResponseReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val response = intent?.getStringExtra("response") ?: return
+            showChatResponse(response)
+        }
+    }
+    
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(createLayout())
@@ -90,6 +98,7 @@ class AgentExecuteActivity : Activity() {
             registerReceiver(logReceiver, IntentFilter("agent.log"))
             registerReceiver(progressReceiver, IntentFilter("agent.progress"))
             registerReceiver(completeReceiver, IntentFilter("agent.complete"))
+            registerReceiver(chatResponseReceiver, IntentFilter("agent.chat_response"))
         }
         
         // 检查是否有预设任务要执行
@@ -108,6 +117,7 @@ class AgentExecuteActivity : Activity() {
             unregisterReceiver(logReceiver)
             unregisterReceiver(progressReceiver)
             unregisterReceiver(completeReceiver)
+            unregisterReceiver(chatResponseReceiver)
         }
     }
     
@@ -197,7 +207,7 @@ class AgentExecuteActivity : Activity() {
                 textSize = 18f
                 setBackgroundColor(Color.TRANSPARENT)
                 setOnClickListener {
-                    startActivity(Intent(this@AgentExecuteActivity, AgentConfigActivity::class.java))
+                    startActivity(Intent(this@AgentExecuteActivity, com.employee.agent.ui.SettingsActivity::class.java))
                 }
             })
         }
@@ -422,13 +432,27 @@ class AgentExecuteActivity : Activity() {
         
         isExecuting = true
         updateUI(executing = true)
-        appendLog("📤 发送任务: $goal")
+        appendLog("🧠 分析用户意图: $goal")
         
-        // 通过广播通知 AgentService 执行任务
-        val intent = Intent("agent.execute").apply {
+        // 使用智能执行：先分析意图，再决定流程
+        val intent = Intent("agent.smart_execute").apply {
             putExtra("goal", goal)
         }
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+    }
+    
+    /**
+     * 处理聊天回复（非操作命令时显示）
+     */
+    private fun showChatResponse(response: String) {
+        handler.post {
+            isExecuting = false
+            updateUI(executing = false)
+            appendLog("💬 AI 回复: $response")
+            
+            // 可选：用 Toast 或对话框显示
+            Toast.makeText(this, response, Toast.LENGTH_LONG).show()
+        }
     }
     
     private fun stopExecution() {
@@ -529,8 +553,18 @@ class AgentExecuteActivity : Activity() {
                 handler.post {
                     goalInput.setText(result as CharSequence)
                     goalInput.setSelection(result.length)
-                    voiceStatusText.visibility = View.GONE
+                    voiceStatusText.text = "✅ 识别完成，即将执行..."
                     appendLog("🎤 语音识别: $result")
+                    
+                    // 🆕 语音识别完成后自动执行（延迟 800ms 让用户看到识别结果）
+                    if (result.isNotBlank() && !isExecuting) {
+                        handler.postDelayed({
+                            voiceStatusText.visibility = View.GONE
+                            executeGoal()
+                        }, 800)
+                    } else {
+                        voiceStatusText.visibility = View.GONE
+                    }
                 }
             }
             onPartialResult = { partial: String ->
@@ -556,7 +590,7 @@ class AgentExecuteActivity : Activity() {
                     } else {
                         voiceButton.text = "🎤 语音"
                         voiceButton.setBackgroundColor(Color.parseColor("#2196F3"))
-                        voiceStatusText.visibility = View.GONE
+                        // 不要在这里隐藏 voiceStatusText，让它显示识别结果
                     }
                 }
             }

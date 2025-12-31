@@ -7,8 +7,15 @@ package com.employee.agent.application
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.util.Log
+import com.employee.agent.AgentService
+import com.employee.agent.application.executor.*
+import com.employee.agent.domain.execution.ExecutionConfig
+import com.employee.agent.domain.execution.ExecutionMode
+import com.employee.agent.domain.screen.ScreenCaptureMode
 import com.employee.agent.domain.script.*
 import com.employee.agent.infrastructure.ai.HunyuanAIClient
+import com.employee.agent.infrastructure.debug.DebugInterface
+import com.employee.agent.infrastructure.popup.PopupDismisser
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
@@ -20,7 +27,7 @@ import java.util.UUID
  * 🚀 脚本引擎
  * 核心功能：
  * 1. AI 生成脚本 - 根据目标自动生成可复用脚本
- * 2. 执行脚本 - 按步骤执行脚本
+ * 2. 执行脚本 - 按步骤执行脚本（支持多种执行模式）
  * 3. 自我改进 - 执行失败时 AI 自动优化脚本
  * 4. 持久化 - 保存和加载脚本
  */
@@ -38,11 +45,242 @@ class ScriptEngine(
     private val aiClient = HunyuanAIClient(apiKey)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
+    // 🔧 调试接口
+    private val debugInterface = DebugInterface.getInstance()
+    
+    // 🛡️ 弹窗清理器
+    private val popupDismisser = PopupDismisser(service)
+    
+    // 🎮 当前执行模式（默认智能模式）
+    var executionMode: ExecutionMode = ExecutionMode.SMART
+    
+    // 📸 自动屏幕模式切换（默认开启）
+    var autoScreenModeSwitch: Boolean = true
+    
+    // 🎮 自动执行模式升级（默认开启）
+    var autoExecutionModeUpgrade: Boolean = true
+    
+    // 📊 执行统计（用于智能模式切换）
+    private var consecutiveFailures = 0
+    private var consecutiveSuccesses = 0
+    private var totalAiInterventions = 0
+    
     // 脚本缓存
     private val scriptsCache = mutableMapOf<String, Script>()
     
     // 执行日志回调
     var onLog: ((String) -> Unit)? = null
+    
+    // ==================== 意图识别 ====================
+    
+    /**
+     * 🧠 用户意图类型
+     */
+    enum class UserIntent {
+        /** 手机操作命令（打开APP、搜索、点击等）*/
+        PHONE_OPERATION,
+        /** 日常聊天/问答 */
+        CHAT,
+        /** 不确定 */
+        UNKNOWN
+    }
+    
+    /**
+     * 🎯 意图分析结果
+     */
+    data class IntentResult(
+        val intent: UserIntent,
+        val confidence: Float,
+        val chatResponse: String? = null,  // 如果是聊天，直接返回回复
+        val operationGoal: String? = null, // 如果是操作，返回清理后的目标
+        val isComplete: Boolean = true     // 🆕 表述是否完整
+    )
+    
+    /**
+     * 🧠 分析用户意图（前置步骤）
+     * 
+     * 在生成脚本之前调用，判断用户是想：
+     * 1. 操作手机（打开APP、搜索、自动化任务）→ 走脚本流程
+     * 2. 日常聊天（闲聊、问答）→ AI 直接回复
+     */
+    suspend fun analyzeIntent(userInput: String): IntentResult = withContext(Dispatchers.IO) {
+        try {
+            log("🧠 分析用户意图: $userInput")
+            
+            // 快速规则匹配（无需调用 AI）
+            val quickResult = quickIntentMatch(userInput)
+            if (quickResult != null) {
+                log("⚡ 快速匹配: ${quickResult.intent}")
+                return@withContext quickResult
+            }
+            
+            // 调用 AI 进行意图分析
+            val prompt = buildIntentAnalysisPrompt(userInput)
+            val messages = listOf(Message(role = "user", content = prompt))
+            val response = aiClient.chat(messages)
+            
+            parseIntentFromAI(response, userInput)
+        } catch (e: Exception) {
+            log("❌ 意图分析失败: ${e.message}")
+            // 失败时默认当作操作命令处理
+            IntentResult(
+                intent = UserIntent.PHONE_OPERATION,
+                confidence = 0.5f,
+                operationGoal = userInput
+            )
+        }
+    }
+    
+    /**
+     * ⚡ 快速规则匹配（无需 AI）
+     */
+    private fun quickIntentMatch(input: String): IntentResult? {
+        val normalized = input.trim().lowercase()
+        
+        // 明确的操作关键词
+        val operationKeywords = listOf(
+            "打开", "启动", "运行", "进入",
+            "搜索", "查找", "查询", "找",
+            "点击", "点一下", "按", "触摸",
+            "滑动", "翻页", "向上", "向下", "向左", "向右",
+            "返回", "后退", "退出",
+            "发送", "转发", "分享", "复制",
+            "下载", "安装", "卸载",
+            "设置", "修改", "更改",
+            "获取", "提取", "采集", "抓取",
+            "登录", "注册", "输入"
+        )
+        
+        // APP 名称关键词
+        val appKeywords = listOf(
+            "小红书", "微信", "抖音", "淘宝", "京东", "支付宝",
+            "qq", "微博", "b站", "哔哩哔哩", "美团", "饿了么",
+            "高德", "百度地图", "网易云", "酷狗", "喜马拉雅",
+            "今日头条", "知乎", "豆瓣", "闲鱼", "拼多多"
+        )
+        
+        // 检查是否包含操作关键词
+        val hasOperationKeyword = operationKeywords.any { normalized.contains(it) }
+        val hasAppKeyword = appKeywords.any { normalized.contains(it) }
+        
+        if (hasOperationKeyword || hasAppKeyword) {
+            // 🆕 判断完整性：操作词 + APP名 = 完整
+            val isComplete = (hasOperationKeyword && hasAppKeyword) || 
+                             normalized.length >= 6 ||  // 较长的指令通常完整
+                             appKeywords.any { normalized == it }  // 单独APP名也算完整（打开它）
+            
+            return IntentResult(
+                intent = UserIntent.PHONE_OPERATION,
+                confidence = 0.95f,
+                operationGoal = input,
+                isComplete = isComplete
+            )
+        }
+        
+        // 明确的聊天模式
+        val chatPatterns = listOf(
+            "你好", "您好", "嗨", "hi", "hello",
+            "谢谢", "感谢", "多谢",
+            "再见", "拜拜", "bye",
+            "你是谁", "你叫什么", "介绍一下你",
+            "今天天气", "天气怎么样",
+            "几点了", "现在时间",
+            "帮我算", "计算一下",
+            "什么意思", "是什么", "怎么理解",
+            "讲个笑话", "说个故事"
+        )
+        
+        val isChatPattern = chatPatterns.any { normalized.contains(it) }
+        if (isChatPattern && !hasOperationKeyword && !hasAppKeyword) {
+            return null  // 交给 AI 处理聊天
+        }
+        
+        return null  // 无法快速判断，需要 AI
+    }
+    
+    /**
+     * 构建意图分析 Prompt
+     */
+    private fun buildIntentAnalysisPrompt(userInput: String): String {
+        return """
+你是一个手机 AI 助手的意图分析器。分析用户输入，判断：
+1. **意图类型**：操作手机 or 日常聊天
+2. **表述完整性**：用户是否已经说完整了
+
+## 用户输入
+"$userInput"
+
+## 输出格式（严格 JSON）
+{
+  "intent": "PHONE_OPERATION 或 CHAT",
+  "confidence": 0.0-1.0,
+  "isComplete": true或false,
+  "reason": "判断理由",
+  "response": "如果是CHAT，这里填写回复内容；否则填null",
+  "goal": "如果是PHONE_OPERATION，这里填清理后的操作目标；否则填null"
+}
+
+## 判断标准
+
+### 意图类型
+- **PHONE_OPERATION**：包含动作词（打开、搜索、点击、获取、发送等）+ 目标对象
+- **CHAT**：打招呼、问候、闲聊、知识问答、不涉及手机操作
+
+### 完整性判断 (isComplete)
+- **true（完整）**：可以直接执行的指令，如"打开微信"、"搜索热门笔记"
+- **false（不完整）**：半句话，如"打开"、"帮我找"、"然后"、"在小红书"
+
+## 示例
+输入："打开微信" → intent=PHONE_OPERATION, isComplete=true, goal="打开微信"
+输入："打开" → intent=PHONE_OPERATION, isComplete=false
+输入："帮我找" → intent=PHONE_OPERATION, isComplete=false
+输入："在小红书找点赞过万的笔记" → intent=PHONE_OPERATION, isComplete=true
+输入："搜索" → intent=PHONE_OPERATION, isComplete=false
+输入："你好" → intent=CHAT, isComplete=true, response="你好！有什么可以帮你的？"
+
+只返回 JSON，不要其他内容。
+""".trimIndent()
+    }
+    
+    /**
+     * 解析 AI 返回的意图分析结果
+     */
+    private fun parseIntentFromAI(response: String, originalInput: String): IntentResult {
+        return try {
+            val jsonStr = extractJson(response)
+            val parsed = gson.fromJson(jsonStr, Map::class.java)
+            
+            val intentStr = parsed["intent"] as? String ?: "PHONE_OPERATION"
+            val confidence = (parsed["confidence"] as? Number)?.toFloat() ?: 0.8f
+            val isComplete = parsed["isComplete"] as? Boolean ?: true
+            val chatResponse = parsed["response"] as? String
+            val goal = parsed["goal"] as? String
+            
+            val intent = when (intentStr.uppercase()) {
+                "CHAT" -> UserIntent.CHAT
+                "PHONE_OPERATION" -> UserIntent.PHONE_OPERATION
+                else -> UserIntent.UNKNOWN
+            }
+            
+            IntentResult(
+                intent = intent,
+                confidence = confidence,
+                chatResponse = chatResponse,
+                operationGoal = goal ?: originalInput,
+                isComplete = isComplete
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse intent", e)
+            // 解析失败，默认当作操作命令
+            IntentResult(
+                intent = UserIntent.PHONE_OPERATION,
+                confidence = 0.5f,
+                operationGoal = originalInput
+            )
+        }
+    }
+    
+    // ==================== 脚本生成 ====================
     
     /**
      * 🎯 根据目标生成脚本
@@ -50,6 +288,7 @@ class ScriptEngine(
     suspend fun generateScript(goal: String): Result<Script> = withContext(Dispatchers.IO) {
         try {
             log("📝 开始为目标生成脚本: $goal")
+            debugInterface.onScriptGenerating(goal)
             
             val prompt = buildScriptGenerationPrompt(goal)
             val messages = listOf(Message(role = "user", content = prompt))
@@ -62,16 +301,18 @@ class ScriptEngine(
                 Result.success(script)
             } else {
                 log("❌ 脚本解析失败")
+                debugInterface.recordError("SCRIPT_PARSE_ERROR", "脚本解析失败", context = mapOf("goal" to goal))
                 Result.failure(Exception("Failed to parse script from AI response"))
             }
         } catch (e: Exception) {
             log("❌ 生成脚本失败: ${e.message}")
+            debugInterface.recordError("SCRIPT_GENERATE_ERROR", "生成脚本失败: ${e.message}", e, mapOf("goal" to goal))
             Result.failure(e)
         }
     }
     
     /**
-     * ▶️ 执行脚本
+     * ▶️ 执行脚本（使用当前执行模式）
      */
     suspend fun executeScript(
         scriptId: String,
@@ -87,7 +328,435 @@ class ScriptEngine(
             )
         }
         
-        executeScriptInternal(script, onProgress)
+        executeScriptWithMode(script, executionMode, onProgress)
+    }
+    
+    /**
+     * ▶️ 执行脚本（指定执行模式）
+     * 
+     * @param scriptId 脚本ID
+     * @param mode 执行模式（FAST/SMART/MONITOR/AGENT）
+     * @param onProgress 进度回调
+     */
+    suspend fun executeScriptWithMode(
+        scriptId: String,
+        mode: ExecutionMode,
+        onProgress: ((Int, Int, String) -> Unit)? = null
+    ): ScriptExecutionResult = withContext(Dispatchers.IO) {
+        val script = loadScript(scriptId)
+        if (script == null) {
+            return@withContext ScriptExecutionResult(
+                success = false,
+                stepsExecuted = 0,
+                totalSteps = 0,
+                error = "Script not found: $scriptId"
+            )
+        }
+        
+        executeScriptWithMode(script, mode, onProgress)
+    }
+    
+    /**
+     * ▶️ 执行脚本对象（指定执行模式）
+     */
+    suspend fun executeScriptWithMode(
+        script: Script,
+        mode: ExecutionMode,
+        onProgress: ((Int, Int, String) -> Unit)? = null
+    ): ScriptExecutionResult = withContext(Dispatchers.IO) {
+        log("▶️ 开始执行脚本: ${script.name} [模式: ${mode.emoji} ${mode.displayName}]")
+        
+        when (mode) {
+            ExecutionMode.FAST -> executeScriptInternal(script, onProgress)
+            ExecutionMode.SMART -> executeScriptSmartMode(script, onProgress)
+            ExecutionMode.MONITOR -> executeScriptMonitorMode(script, onProgress)
+            ExecutionMode.AGENT -> executeScriptAgentMode(script, onProgress)
+        }
+    }
+    
+    /**
+     * 🛡️ 智能模式执行
+     */
+    private suspend fun executeScriptSmartMode(
+        script: Script,
+        onProgress: ((Int, Int, String) -> Unit)?
+    ): ScriptExecutionResult {
+        val logs = mutableListOf<String>()
+        val extractedData = mutableMapOf<String, Any>()
+        var popupsDismissed = 0
+        var aiInterventions = 0
+        
+        log("🛡️ 智能模式执行中...")
+        debugInterface.onTaskStart(script.id, script.name, script.goal, script.steps.size)
+        
+        // 📸 首次执行：切换到全量模式（需要完整上下文）
+        autoSwitchScreenMode("首次分析", ScreenCaptureMode.FULL_DUMP)
+        
+        for ((index, step) in script.steps.withIndex()) {
+            val stepNum = index + 1
+            log("📍 步骤 $stepNum/${script.steps.size}: ${step.description}")
+            onProgress?.invoke(stepNum, script.steps.size, step.description)
+            debugInterface.onStepStart(stepNum, step.type.name, step.description)
+            
+            // 🛡️ 执行前：自动清理弹窗
+            val dismissResult = popupDismisser.dismissAllPopups(maxAttempts = 3, delayMs = 300)
+            if (dismissResult.popupsCleared > 0) {
+                popupsDismissed += dismissResult.popupsCleared
+                logs.add("🛡️ 清理了 ${dismissResult.popupsCleared} 个弹窗")
+                log("🛡️ 清理了 ${dismissResult.popupsCleared} 个弹窗")
+            }
+            
+            // 📸 执行步骤前：切换到增量模式（等待变化）
+            if (stepNum > 1) {
+                autoSwitchScreenMode("等待变化", ScreenCaptureMode.INCREMENTAL)
+            }
+            
+            var retries = 0
+            var stepSuccess = false
+            var lastError: String? = null
+            
+            while (retries <= step.maxRetries && !stepSuccess) {
+                try {
+                    val stepResult = executeStep(step, extractedData)
+                    if (stepResult.success) {
+                        stepSuccess = true
+                        stepResult.data?.let { extractedData.putAll(it) }
+                        logs.add("✅ 步骤 $stepNum 成功")
+                        debugInterface.onStepComplete(stepNum, true)
+                    } else {
+                        lastError = stepResult.error
+                        retries++
+                        if (retries <= step.maxRetries) {
+                            log("⚠️ 步骤失败，重试 $retries/${step.maxRetries}")
+                            
+                            // 🛡️ 重试前再清理一次弹窗
+                            val retryDismiss = popupDismisser.dismissAllPopups(maxAttempts = 2)
+                            if (retryDismiss.popupsCleared > 0) {
+                                popupsDismissed += retryDismiss.popupsCleared
+                                log("🛡️ 重试前清理了 ${retryDismiss.popupsCleared} 个弹窗")
+                            }
+                            
+                            delay(1000)
+                        }
+                    }
+                } catch (e: Exception) {
+                    lastError = e.message
+                    retries++
+                    logs.add("❌ 步骤 $stepNum 异常: ${e.message}")
+                }
+            }
+            
+            // 🤖 智能恢复：步骤失败时尝试 AI 分析
+            if (!stepSuccess) {
+                log("🤖 步骤失败，尝试 AI 分析恢复...")
+                aiInterventions++
+                
+                // 📸 恢复时：切换到全量模式（AI 需要完整上下文）
+                autoSwitchScreenMode("AI分析恢复", ScreenCaptureMode.FULL_DUMP)
+                
+                val recoveryAttempt = attemptSmartRecovery(step, lastError ?: "未知错误")
+                if (recoveryAttempt.recovered) {
+                    log("✅ AI 恢复成功: ${recoveryAttempt.action}")
+                    logs.add("🤖 AI 恢复: ${recoveryAttempt.action}")
+                    
+                    // 📸 恢复后验证：切换到 DIFF 模式（精确检查变化）
+                    autoSwitchScreenMode("验证恢复结果", ScreenCaptureMode.DIFF)
+                    
+                    // 恢复后重试
+                    val retryResult = executeStep(step, extractedData)
+                    if (retryResult.success) {
+                        stepSuccess = true
+                        retryResult.data?.let { extractedData.putAll(it) }
+                        logs.add("✅ 步骤 $stepNum 恢复后成功")
+                        debugInterface.onStepComplete(stepNum, true)
+                    }
+                }
+            }
+            
+            if (!stepSuccess) {
+                val error = "步骤 $stepNum 失败: ${step.description}"
+                debugInterface.onStepComplete(stepNum, false, error)
+                debugInterface.onTaskComplete(false, error)
+                
+                return ScriptExecutionResult(
+                    success = false,
+                    stepsExecuted = index,
+                    totalSteps = script.steps.size,
+                    extractedData = extractedData,
+                    error = error,
+                    failedStepIndex = index,
+                    logs = logs,
+                    popupsDismissed = popupsDismissed,
+                    aiInterventions = aiInterventions
+                )
+            }
+            
+            delay(500)
+        }
+        
+        log("✅ 脚本执行完成! (清理弹窗: $popupsDismissed, AI介入: $aiInterventions)")
+        debugInterface.onTaskComplete(true)
+        
+        return ScriptExecutionResult(
+            success = true,
+            stepsExecuted = script.steps.size,
+            totalSteps = script.steps.size,
+            extractedData = extractedData,
+            logs = logs,
+            popupsDismissed = popupsDismissed,
+            aiInterventions = aiInterventions
+        )
+    }
+    
+    /**
+     * 🤖 智能恢复尝试
+     */
+    private suspend fun attemptSmartRecovery(step: ScriptStep, error: String): SmartRecoveryResult {
+        return try {
+            // 先尝试清理弹窗
+            val dismissResult = popupDismisser.dismissAllPopups(maxAttempts = 3)
+            if (dismissResult.popupsCleared > 0) {
+                return SmartRecoveryResult(
+                    recovered = true,
+                    action = "清理了 ${dismissResult.popupsCleared} 个弹窗"
+                )
+            }
+            
+            // 弹窗清理无效，调用 AI 分析
+            val prompt = """
+步骤执行失败，请分析原因并给出简洁的恢复建议。
+
+步骤: ${step.type} - ${step.description}
+错误: $error
+
+只返回JSON: {"canRecover": true/false, "action": "恢复操作"}
+""".trimIndent()
+            
+            val response = aiClient.chat(listOf(Message("user", prompt)))
+            val jsonStr = extractJson(response)
+            val map = gson.fromJson(jsonStr, Map::class.java)
+            
+            SmartRecoveryResult(
+                recovered = map["canRecover"] as? Boolean ?: false,
+                action = map["action"] as? String ?: "无法恢复"
+            )
+        } catch (e: Exception) {
+            log("❌ 智能恢复失败: ${e.message}")
+            SmartRecoveryResult(recovered = false, action = "恢复失败")
+        }
+    }
+    
+    /**
+     * 👁️ 监控模式执行（每步 AI 验证）
+     * 
+     * 与 SMART 模式的区别：
+     * - SMART: 只在失败时调用 AI
+     * - MONITOR: 每步执行后都让 AI 验证结果是否符合预期
+     */
+    private suspend fun executeScriptMonitorMode(
+        script: Script,
+        onProgress: ((Int, Int, String) -> Unit)?
+    ): ScriptExecutionResult {
+        val logs = mutableListOf<String>()
+        val extractedData = mutableMapOf<String, Any>()
+        var aiVerifications = 0
+        
+        log("👁️ 监控模式执行中（每步 AI 验证）...")
+        debugInterface.onTaskStart(script.id, script.name, script.goal, script.steps.size)
+        
+        // 📸 首次执行：切换到全量模式
+        autoSwitchScreenMode("监控模式启动", ScreenCaptureMode.FULL_DUMP)
+        
+        for ((index, step) in script.steps.withIndex()) {
+            val stepNum = index + 1
+            log("📍 步骤 $stepNum/${script.steps.size}: ${step.description}")
+            onProgress?.invoke(stepNum, script.steps.size, step.description)
+            debugInterface.onStepStart(stepNum, step.type.name, step.description)
+            
+            // 🛡️ 清理弹窗
+            popupDismisser.dismissAllPopups(maxAttempts = 3, delayMs = 300)
+            
+            // 📸 执行前拍摄快照（用于 AI 验证）
+            autoSwitchScreenMode("执行前快照", ScreenCaptureMode.DIFF)
+            val smartReader = AgentService.getInstance()?.smartScreenReader
+            smartReader?.takeBaselineSnapshot()
+            
+            // 执行步骤
+            val stepResult = executeStep(step, extractedData)
+            
+            // 👁️ 每步执行后 AI 验证
+            aiVerifications++
+            val verifyResult = verifyStepWithAI(step, stepResult)
+            
+            if (verifyResult.verified) {
+                log("✅ AI 验证通过: ${verifyResult.reason}")
+                stepResult.data?.let { extractedData.putAll(it) }
+                logs.add("✅ 步骤 $stepNum 成功 (AI验证: ${verifyResult.confidence}%)")
+                debugInterface.onStepComplete(stepNum, true)
+                consecutiveSuccesses++
+                consecutiveFailures = 0
+            } else {
+                log("⚠️ AI 验证未通过: ${verifyResult.reason}")
+                consecutiveFailures++
+                consecutiveSuccesses = 0
+                
+                // 尝试 AI 恢复
+                autoSwitchScreenMode("AI恢复分析", ScreenCaptureMode.FULL_DUMP)
+                val recoveryAttempt = attemptSmartRecovery(step, verifyResult.reason)
+                if (recoveryAttempt.recovered) {
+                    log("✅ AI 恢复成功: ${recoveryAttempt.action}")
+                    val retryResult = executeStep(step, extractedData)
+                    if (retryResult.success) {
+                        retryResult.data?.let { extractedData.putAll(it) }
+                        debugInterface.onStepComplete(stepNum, true)
+                    }
+                } else {
+                    // 检查是否需要升级到 AGENT 模式
+                    if (shouldUpgradeToAgentMode()) {
+                        log("🔄 连续失败，自动升级到 AGENT 模式...")
+                        return executeScriptAgentMode(script, onProgress)
+                    }
+                    
+                    val error = "步骤 $stepNum AI验证失败: ${verifyResult.reason}"
+                    debugInterface.onStepComplete(stepNum, false, error)
+                    debugInterface.onTaskComplete(false, error)
+                    return ScriptExecutionResult(
+                        success = false,
+                        stepsExecuted = index,
+                        totalSteps = script.steps.size,
+                        error = error,
+                        logs = logs
+                    )
+                }
+            }
+            
+            delay(800) // 监控模式稍慢一点
+        }
+        
+        log("🏁 监控模式执行完成，AI验证 $aiVerifications 次")
+        debugInterface.onTaskComplete(true)
+        return ScriptExecutionResult(
+            success = true,
+            stepsExecuted = script.steps.size,
+            totalSteps = script.steps.size,
+            extractedData = extractedData,
+            logs = logs
+        )
+    }
+    
+    /**
+     * 🤖 代理模式执行（AI 全程控制）
+     * 
+     * 与 MONITOR 模式的区别：
+     * - MONITOR: AI 验证脚本步骤是否正确
+     * - AGENT: AI 自主决定下一步做什么，脚本只是参考
+     */
+    private suspend fun executeScriptAgentMode(
+        script: Script,
+        onProgress: ((Int, Int, String) -> Unit)?
+    ): ScriptExecutionResult {
+        val logs = mutableListOf<String>()
+        val extractedData = mutableMapOf<String, Any>()
+        var aiDecisions = 0
+        var maxDecisions = script.steps.size * 3 // 防止无限循环
+        
+        log("🤖 代理模式执行中（AI 全程决策）...")
+        debugInterface.onTaskStart(script.id, script.name, script.goal, script.steps.size)
+        
+        // 📸 全程使用全量模式（AI 需要完整上下文）
+        autoSwitchScreenMode("代理模式启动", ScreenCaptureMode.FULL_DUMP)
+        
+        // AI 代理循环：持续决策直到目标完成或达到上限
+        var goalAchieved = false
+        var currentStepIndex = 0
+        
+        while (!goalAchieved && aiDecisions < maxDecisions) {
+            aiDecisions++
+            
+            // 获取当前屏幕状态
+            val screenState = getScreenStateForAI()
+            
+            // 让 AI 决定下一步
+            val aiDecision = askAIForNextAction(
+                goal = script.goal,
+                currentScreen = screenState,
+                executedSteps = currentStepIndex,
+                scriptSteps = script.steps.map { it.description }
+            )
+            
+            log("🤖 AI 决策 #$aiDecisions: ${aiDecision.action}")
+            onProgress?.invoke(currentStepIndex + 1, script.steps.size, aiDecision.action)
+            
+            when (aiDecision.type) {
+                ScriptAIDecisionType.EXECUTE_STEP -> {
+                    // 执行脚本中的某个步骤
+                    val stepIndex = aiDecision.stepIndex ?: currentStepIndex
+                    if (stepIndex < script.steps.size) {
+                        val step = script.steps[stepIndex]
+                        val result = executeStep(step, extractedData)
+                        if (result.success) {
+                            result.data?.let { extractedData.putAll(it) }
+                            logs.add("✅ AI执行步骤: ${step.description}")
+                            currentStepIndex = stepIndex + 1
+                        } else {
+                            logs.add("⚠️ AI执行失败: ${result.error}")
+                        }
+                    }
+                }
+                ScriptAIDecisionType.CUSTOM_ACTION -> {
+                    // AI 自定义操作（不在脚本中）
+                    val customResult = executeCustomAIAction(aiDecision)
+                    logs.add("🤖 AI自定义操作: ${aiDecision.action}")
+                }
+                ScriptAIDecisionType.WAIT -> {
+                    // AI 决定等待
+                    log("⏳ AI 决定等待 ${aiDecision.waitMs}ms")
+                    delay(aiDecision.waitMs ?: 1000)
+                }
+                ScriptAIDecisionType.GOAL_ACHIEVED -> {
+                    // AI 判断目标已完成
+                    goalAchieved = true
+                    log("🎯 AI 判断目标已达成: ${aiDecision.reason}")
+                }
+                ScriptAIDecisionType.GOAL_IMPOSSIBLE -> {
+                    // AI 判断目标无法完成
+                    val error = "AI判断目标无法完成: ${aiDecision.reason}"
+                    log("❌ $error")
+                    debugInterface.onTaskComplete(false, error)
+                    return ScriptExecutionResult(
+                        success = false,
+                        stepsExecuted = currentStepIndex,
+                        totalSteps = script.steps.size,
+                        error = error,
+                        logs = logs
+                    )
+                }
+            }
+            
+            delay(1000) // 代理模式较慢，给 AI 更多思考时间
+        }
+        
+        if (!goalAchieved) {
+            val error = "AI 决策次数达到上限 ($maxDecisions)，目标未完成"
+            log("⚠️ $error")
+            return ScriptExecutionResult(
+                success = false,
+                stepsExecuted = currentStepIndex,
+                totalSteps = script.steps.size,
+                error = error,
+                logs = logs
+            )
+        }
+        
+        log("🏁 代理模式执行完成，AI决策 $aiDecisions 次")
+        debugInterface.onTaskComplete(true)
+        return ScriptExecutionResult(
+            success = true,
+            stepsExecuted = script.steps.size,
+            totalSteps = script.steps.size,
+            extractedData = extractedData,
+            logs = logs
+        )
     }
     
     /**
@@ -109,7 +778,7 @@ class ScriptEngine(
         
         do {
             log("🔄 执行尝试 ${attempts + 1}/$MAX_IMPROVE_ATTEMPTS")
-            result = executeScriptInternal(script, onProgress)
+            result = executeScriptWithMode(script, executionMode, onProgress)
             
             if (result.success) {
                 // 更新成功计数
@@ -143,6 +812,7 @@ class ScriptEngine(
     suspend fun improveScript(script: Script, failResult: ScriptExecutionResult): Script? {
         return try {
             log("🔧 AI 正在分析失败原因并改进脚本...")
+            debugInterface.onScriptImproving("执行失败，尝试优化: ${failResult.error}")
             
             val prompt = buildImprovementPrompt(script, failResult)
             val messages = listOf(Message(role = "user", content = prompt))
@@ -176,11 +846,13 @@ class ScriptEngine(
         val extractedData = mutableMapOf<String, Any>()
         
         log("▶️ 开始执行脚本: ${script.name}")
+        debugInterface.onTaskStart(script.id, script.name, script.goal, script.steps.size)
         
         for ((index, step) in script.steps.withIndex()) {
             val stepNum = index + 1
             log("📍 步骤 $stepNum/${script.steps.size}: ${step.description}")
             onProgress?.invoke(stepNum, script.steps.size, step.description)
+            debugInterface.onStepStart(stepNum, step.type.name, step.description)
             
             var retries = 0
             var stepSuccess = false
@@ -192,26 +864,40 @@ class ScriptEngine(
                         stepSuccess = true
                         stepResult.data?.let { extractedData.putAll(it) }
                         logs.add("✅ 步骤 $stepNum 成功")
+                        debugInterface.onStepComplete(stepNum, true)
                     } else {
                         retries++
                         if (retries <= step.maxRetries) {
                             log("⚠️ 步骤失败，重试 $retries/${step.maxRetries}")
+                            debugInterface.onStepRetry(stepNum, retries, stepResult.error ?: "未知原因")
                             delay(1000)
                         }
                     }
                 } catch (e: Exception) {
                     retries++
                     logs.add("❌ 步骤 $stepNum 异常: ${e.message}")
+                    debugInterface.recordError("STEP_EXCEPTION", "步骤 $stepNum 异常", e, 
+                        mapOf("step" to stepNum, "type" to step.type.name))
                 }
             }
             
             if (!stepSuccess) {
+                val error = "步骤 $stepNum 失败: ${step.description}"
+                debugInterface.onStepComplete(stepNum, false, error)
+                debugInterface.onTaskComplete(false, error)
+                debugInterface.recordError("STEP_FAILED", error, context = mapOf(
+                    "step_index" to index,
+                    "step_type" to step.type.name,
+                    "step_description" to step.description,
+                    "retries" to retries
+                ))
+                
                 return ScriptExecutionResult(
                     success = false,
                     stepsExecuted = index,
                     totalSteps = script.steps.size,
                     extractedData = extractedData,
-                    error = "步骤 $stepNum 失败: ${step.description}",
+                    error = error,
                     failedStepIndex = index,
                     logs = logs
                 )
@@ -222,6 +908,8 @@ class ScriptEngine(
         }
         
         log("✅ 脚本执行完成!")
+        debugInterface.onTaskComplete(true)
+        
         return ScriptExecutionResult(
             success = true,
             stepsExecuted = script.steps.size,
@@ -294,6 +982,7 @@ class ScriptEngine(
         val goToHome = step.params["go_home"] as? Boolean ?: true // 默认回到首页
         
         try {
+            log("🚀 尝试启动应用: $packageName")
             val intent = service.packageManager.getLaunchIntentForPackage(packageName)
             if (intent != null) {
                 intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -309,9 +998,21 @@ class ScriptEngine(
                 
                 return StepResult(true)
             }
-            return StepResult(false, "App not found: $packageName")
+            
+            val error = "应用未安装或无法启动: $packageName"
+            debugInterface.recordError("LAUNCH_APP_FAILED", error, context = mapOf(
+                "package" to packageName,
+                "reason" to "getLaunchIntentForPackage 返回 null"
+            ), suggestion = "检查应用是否已安装，或在 AndroidManifest.xml 中添加 <queries> 声明")
+            return StepResult(false, error)
         } catch (e: Exception) {
-            return StepResult(false, "Launch failed: ${e.message}")
+            val error = "启动应用失败: ${e.message}"
+            debugInterface.recordError("LAUNCH_APP_EXCEPTION", error, e, mapOf(
+                "package" to packageName
+            ), suggestion = if (e.message?.contains("BLOCKED") == true) 
+                "Android 11+ 包可见性限制，需要在 AndroidManifest.xml 添加 <queries> 声明" 
+                else "检查应用是否存在权限问题")
+            return StepResult(false, error)
         }
     }
     
@@ -385,7 +1086,14 @@ class ScriptEngine(
         
         log("🔍 FIND_AND_TAP: text=$text, contains=$contains, pattern=$pattern")
         
-        val root = service.rootInActiveWindow ?: return StepResult(false, "No window")
+        val root = service.rootInActiveWindow
+        if (root == null) {
+            val error = "无法获取当前窗口"
+            debugInterface.recordError("NO_WINDOW", error, context = mapOf(
+                "step_type" to "FIND_AND_TAP"
+            ), suggestion = "确保无障碍服务已启用且有活动窗口")
+            return StepResult(false, error)
+        }
         
         // 遍历查找匹配元素（使用增强版）
         val target = findMatchingNodeEnhanced(root, text, contains, pattern)
@@ -396,7 +1104,19 @@ class ScriptEngine(
             return performTap(rect.centerX(), rect.centerY())
         }
         
-        return StepResult(false, "Element not found: text=$text, contains=$contains, pattern=$pattern")
+        // 收集当前页面信息用于诊断
+        val visibleTexts = mutableListOf<String>()
+        collectAllTexts(root, visibleTexts, 30)
+        
+        val error = "未找到目标元素: text=$text, contains=$contains, pattern=$pattern"
+        debugInterface.recordError("ELEMENT_NOT_FOUND", error, context = mapOf(
+            "search_text" to (text ?: ""),
+            "search_contains" to (contains ?: ""),
+            "search_pattern" to (pattern ?: ""),
+            "visible_texts" to visibleTexts.take(15).joinToString(", ")
+        ), suggestion = "检查目标文本是否正确，或尝试使用 contains 模糊匹配")
+        
+        return StepResult(false, error)
     }
     
     private suspend fun executeScrollUntilFind(step: ScriptStep): StepResult {
@@ -472,7 +1192,16 @@ class ScriptEngine(
             delay(1000)
         }
         
-        return StepResult(false, "Element not found after $maxScrolls scrolls")
+        val error = "滚动 $maxScrolls 次后未找到目标元素"
+        debugInterface.recordError("SCROLL_FIND_FAILED", error, context = mapOf(
+            "search_text" to (text ?: ""),
+            "search_contains" to (contains ?: ""),
+            "search_pattern" to (pattern ?: ""),
+            "max_scrolls" to maxScrolls.toString(),
+            "direction" to direction
+        ), suggestion = "增加 max_scrolls 次数，或检查目标文本是否在页面中存在")
+        
+        return StepResult(false, error)
     }
     
     /**
@@ -709,8 +1438,95 @@ class ScriptEngine(
     
     private suspend fun executeInputText(step: ScriptStep): StepResult {
         val text = step.params["text"] as? String ?: return StepResult(false, "Missing text")
-        // TODO: 实现输入文本
-        return StepResult(true)
+        
+        log("⌨️ 输入文本: $text")
+        
+        // 方法1：通过无障碍服务的 ACTION_SET_TEXT
+        val root = service.rootInActiveWindow
+        if (root != null) {
+            // 查找当前聚焦的可编辑元素
+            val focusedNode = root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focusedNode != null && focusedNode.isEditable) {
+                val args = android.os.Bundle().apply {
+                    putCharSequence(
+                        android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                        text
+                    )
+                }
+                val success = focusedNode.performAction(
+                    android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
+                    args
+                )
+                focusedNode.recycle()
+                if (success) {
+                    log("✅ 文本输入成功 (ACTION_SET_TEXT)")
+                    delay(300) // 等待输入完成
+                    return StepResult(true)
+                }
+            }
+            
+            // 方法2：查找第一个可编辑的输入框
+            val editableNode = findFirstEditableNode(root)
+            if (editableNode != null) {
+                // 先点击获取焦点
+                val rect = android.graphics.Rect()
+                editableNode.getBoundsInScreen(rect)
+                performTap(rect.centerX(), rect.centerY())
+                delay(300)
+                
+                // 然后设置文本
+                val args = android.os.Bundle().apply {
+                    putCharSequence(
+                        android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                        text
+                    )
+                }
+                val success = editableNode.performAction(
+                    android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
+                    args
+                )
+                editableNode.recycle()
+                if (success) {
+                    log("✅ 文本输入成功 (找到输入框并设置)")
+                    delay(300)
+                    return StepResult(true)
+                }
+            }
+        }
+        
+        // 方法3：通过 ADB input text 命令（备用方案）
+        try {
+            val runtime = Runtime.getRuntime()
+            // 对特殊字符进行转义
+            val escapedText = text.replace(" ", "%s")
+            val process = runtime.exec(arrayOf("su", "-c", "input text '$escapedText'"))
+            val exitCode = process.waitFor()
+            if (exitCode == 0) {
+                log("✅ 文本输入成功 (input text)")
+                delay(300)
+                return StepResult(true)
+            }
+        } catch (e: Exception) {
+            log("⚠️ input text 命令失败: ${e.message}")
+        }
+        
+        return StepResult(false, "无法输入文本，请确保输入框已获得焦点")
+    }
+    
+    /**
+     * 查找第一个可编辑的输入框
+     */
+    private fun findFirstEditableNode(node: android.view.accessibility.AccessibilityNodeInfo): android.view.accessibility.AccessibilityNodeInfo? {
+        if (node.isEditable && node.isVisibleToUser) {
+            return node
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val result = findFirstEditableNode(child)
+            if (result != null) return result
+            child.recycle()
+        }
+        return null
     }
     
     private suspend fun executeBack(step: ScriptStep): StepResult {
@@ -763,7 +1579,13 @@ $elements
             .build()
         
         val success = service.dispatchGesture(gesture, null, null)
-        return StepResult(success, if (!success) "Gesture failed" else null)
+        if (!success) {
+            debugInterface.recordError("TAP_GESTURE_FAILED", "点击手势执行失败", context = mapOf(
+                "x" to x.toString(),
+                "y" to y.toString()
+            ), suggestion = "检查无障碍服务是否正常运行，或坐标是否在屏幕范围内")
+        }
+        return StepResult(success, if (!success) "点击手势执行失败 ($x, $y)" else null)
     }
     
     private fun performSwipe(direction: String): StepResult {
@@ -776,7 +1598,13 @@ $elements
             "down" -> listOf(width / 2, height / 4, width / 2, height * 3 / 4)
             "left" -> listOf(width * 3 / 4, height / 2, width / 4, height / 2)
             "right" -> listOf(width / 4, height / 2, width * 3 / 4, height / 2)
-            else -> return StepResult(false, "Invalid direction")
+            else -> {
+                debugInterface.recordError("INVALID_SWIPE_DIRECTION", "无效的滑动方向: $direction", context = mapOf(
+                    "direction" to direction,
+                    "valid_directions" to "up, down, left, right"
+                ))
+                return StepResult(false, "无效的滑动方向: $direction")
+            }
         }
         
         val path = android.graphics.Path().apply {
@@ -788,6 +1616,13 @@ $elements
             .build()
         
         val success = service.dispatchGesture(gesture, null, null)
+        if (!success) {
+            debugInterface.recordError("SWIPE_GESTURE_FAILED", "滑动手势执行失败", context = mapOf(
+                "direction" to direction,
+                "start" to "($startX, $startY)",
+                "end" to "($endX, $endY)"
+            ))
+        }
         return StepResult(success)
     }
     
@@ -1065,28 +1900,44 @@ $goal
 3. SWIPE - 滑动 {"direction": "up|down|left|right"}
 4. WAIT - 等待 {"ms": 1000}
 5. FIND_AND_TAP - 查找并点击 {"text": "精确文本"} 或 {"contains": "包含文本"} 或 {"pattern": "正则表达式"}
-6. SCROLL_UNTIL_FIND - 滚动直到找到并**自动点击** 
+6. INPUT_TEXT - 在当前聚焦的输入框中输入文本 {"text": "要输入的内容"}
+   ⚠️ 必须先点击输入框使其获得焦点，再使用此步骤！
+7. SCROLL_UNTIL_FIND - 滚动直到找到并**自动点击** 
    参数: {"contains": "文本", "max_scrolls": 10, "direction": "up", "excludes": ["排除词1", "排除词2"]}
    ⚠️ 注意：此步骤会自动点击找到的元素，不需要额外的TAP或FIND_AND_TAP步骤！
    ⚠️ 重要：使用 excludes 参数排除不想要的内容类型（如直播）
-7. EXTRACT_DATA - 提取数据 {"field": "comments", "count": 5}
-8. BACK - 返回 {}
-9. AI_DECIDE - AI动态决策 {"goal": "子目标描述"}
+8. EXTRACT_DATA - 提取数据 {"field": "comments", "count": 5}
+9. BACK - 返回 {}
+10. AI_DECIDE - AI动态决策 {"goal": "子目标描述"}
 
 ## ⚠️ 关键规则
 1. **禁止使用占位符文本**！如"笔记标题"、"目标内容"等。必须使用 contains 或 pattern 匹配真实内容
 2. **SCROLL_UNTIL_FIND 会自动点击**：找到后会自动点击进入，不需要再加FIND_AND_TAP步骤
 3. **数字匹配优先用正则**：查找"点赞过万"应使用 {"contains": "万"}
-4. **小红书特殊处理**：
+4. **搜索操作的正确流程**：
+   - 点击搜索框 → INPUT_TEXT输入关键词 → 点击搜索按钮
+   - ⚠️ 错误做法：直接SCROLL_UNTIL_FIND搜索关键词（这是滚动查找，不是搜索！）
+5. **小红书特殊处理**：
    - 笔记点赞数通常显示在笔记卡片右下角，格式如"1.2万"、"8.5w"、"12345"
    - 评论区通常需要向上滑动才能看到
    - ⚠️ **直播卡片没有评论区**！要提取评论时，必须排除直播！使用 excludes: ["直播", "观看", "连麦"]
-5. **步骤要精简**：SCROLL_UNTIL_FIND找到并点击后，直接WAIT然后继续下一步
+6. **步骤要精简**：SCROLL_UNTIL_FIND找到并点击后，直接WAIT然后继续下一步
 
-## 常见APP包名
+## 常用APP包名（⚠️ 必须使用正确的包名！）
 - 小红书: com.xingin.xhs
+- 京东: com.jingdong.app.mall
+- 淘宝: com.taobao.taobao
 - 抖音: com.ss.android.ugc.aweme
 - 微信: com.tencent.mm
+- QQ: com.tencent.mobileqq
+- 微博: com.sina.weibo
+- B站: tv.danmaku.bili
+- 支付宝: com.eg.android.AlipayGphone
+- 钉钉: com.alibaba.android.rimet
+- 高德地图: com.autonavi.minimap
+- 百度地图: com.baidu.BaiduMap
+- 网易云音乐: com.netease.cloudmusic
+- 酷狗音乐: com.kugou.android
 
 ## 示例：获取小红书热门评论（排除直播）
 {
@@ -1100,6 +1951,21 @@ $goal
     {"index": 6, "type": "EXTRACT_DATA", "description": "提取前5条评论", "params": {"field": "comments", "count": 5}, "on_fail": "AI_TAKEOVER", "max_retries": 2}
   ],
   "outputs": ["comments"]
+}
+
+## 示例：在京东搜索商品（⚠️ 搜索操作必须这样做！）
+{
+  "name": "京东搜索CPU",
+  "steps": [
+    {"index": 1, "type": "LAUNCH_APP", "description": "打开京东", "params": {"package": "com.jingdong.app.mall"}, "on_fail": "RETRY", "max_retries": 3},
+    {"index": 2, "type": "WAIT", "description": "等待京东首页加载", "params": {"ms": 3000}, "on_fail": "SKIP", "max_retries": 1},
+    {"index": 3, "type": "FIND_AND_TAP", "description": "点击顶部搜索框", "params": {"contains": "搜索"}, "on_fail": "RETRY", "max_retries": 3},
+    {"index": 4, "type": "WAIT", "description": "等待搜索页加载", "params": {"ms": 1500}, "on_fail": "SKIP", "max_retries": 1},
+    {"index": 5, "type": "INPUT_TEXT", "description": "输入搜索关键词", "params": {"text": "CPU"}, "on_fail": "RETRY", "max_retries": 3},
+    {"index": 6, "type": "FIND_AND_TAP", "description": "点击搜索按钮", "params": {"text": "搜索"}, "on_fail": "RETRY", "max_retries": 3},
+    {"index": 7, "type": "WAIT", "description": "等待搜索结果加载", "params": {"ms": 3000}, "on_fail": "SKIP", "max_retries": 1}
+  ],
+  "outputs": ["search_results"]
 }
 
 注意：SCROLL_UNTIL_FIND 在第3步找到并点击了笔记，不需要额外的FIND_AND_TAP步骤！
@@ -1182,7 +2048,20 @@ ${gson.toJson(script)}
     private fun parseImprovedSteps(response: String): List<ScriptStep>? {
         return try {
             val jsonStr = extractJson(response)
-            val stepsRaw = gson.fromJson(jsonStr, List::class.java) as? List<*> ?: return null
+            
+            // AI 可能返回 { "steps": [...] } 或直接 [...]
+            val stepsRaw: List<*> = try {
+                // 首先尝试解析为数组
+                gson.fromJson(jsonStr, List::class.java) as? List<*> ?: run {
+                    // 如果失败，尝试解析为对象并提取 steps
+                    val obj = gson.fromJson(jsonStr, Map::class.java) as? Map<*, *>
+                    obj?.get("steps") as? List<*> ?: return null
+                }
+            } catch (e: Exception) {
+                // 解析为对象并提取 steps
+                val obj = gson.fromJson(jsonStr, Map::class.java) as? Map<*, *>
+                obj?.get("steps") as? List<*> ?: return null
+            }
             
             stepsRaw.mapIndexed { index, stepRaw ->
                 val stepMap = stepRaw as? Map<*, *> ?: return@mapIndexed null
@@ -1254,7 +2133,263 @@ ${gson.toJson(script)}
         Log.d(TAG, message)
         onLog?.invoke(message)
     }
+    
+    // ==================== 📸 屏幕模式自动切换 ====================
+    
+    /**
+     * 根据场景自动切换屏幕获取模式
+     * 
+     * 切换策略：
+     * - 首次分析/AI恢复 → FULL_DUMP（需要完整上下文）
+     * - 等待变化/检测 → INCREMENTAL（低延迟监控）  
+     * - 验证结果/确认 → DIFF（精确对比）
+     */
+    private fun autoSwitchScreenMode(scenario: String, targetMode: ScreenCaptureMode) {
+        if (!autoScreenModeSwitch) {
+            log("📸 屏幕模式自动切换已禁用")
+            return
+        }
+        
+        val smartReader = AgentService.getInstance()?.smartScreenReader
+        if (smartReader == null) {
+            log("⚠️ SmartScreenReader 未初始化，跳过模式切换")
+            return
+        }
+        
+        val currentMode = smartReader.currentMode
+        if (currentMode != targetMode) {
+            log("📸 场景「$scenario」: ${currentMode.emoji} ${currentMode.displayName} → ${targetMode.emoji} ${targetMode.displayName}")
+            smartReader.setMode(targetMode)
+            
+            // DIFF 模式自动拍摄基线
+            if (targetMode == ScreenCaptureMode.DIFF) {
+                smartReader.takeBaselineSnapshot()
+                log("📸 已拍摄基线快照")
+            }
+        }
+    }
+    
+    /**
+     * 获取当前屏幕模式
+     */
+    fun getCurrentScreenMode(): ScreenCaptureMode {
+        return AgentService.getInstance()?.smartScreenReader?.currentMode 
+            ?: ScreenCaptureMode.FULL_DUMP
+    }
+    
+    /**
+     * 手动设置屏幕模式（覆盖自动切换）
+     */
+    fun setScreenMode(mode: ScreenCaptureMode) {
+        val smartReader = AgentService.getInstance()?.smartScreenReader
+        if (smartReader != null) {
+            log("📸 手动设置屏幕模式: ${mode.emoji} ${mode.displayName}")
+            smartReader.setMode(mode)
+        }
+    }
+    
+    // ==================== 🎮 执行模式自动切换 ====================
+    
+    /**
+     * 判断是否应该升级到 AGENT 模式
+     * 
+     * 触发条件：
+     * - 连续失败 >= 3 次
+     * - AI 介入次数过多（说明脚本不稳定）
+     */
+    private fun shouldUpgradeToAgentMode(): Boolean {
+        if (!autoExecutionModeUpgrade) return false
+        if (executionMode == ExecutionMode.AGENT) return false // 已经是最高级
+        
+        return consecutiveFailures >= 3 || totalAiInterventions >= 5
+    }
+    
+    /**
+     * 判断是否可以降级到 FAST 模式
+     * 
+     * 触发条件：
+     * - 连续成功 >= 10 次
+     * - 无 AI 介入
+     */
+    private fun shouldDowngradeToFastMode(): Boolean {
+        if (!autoExecutionModeUpgrade) return false
+        if (executionMode == ExecutionMode.FAST) return false // 已经是最低级
+        
+        return consecutiveSuccesses >= 10 && totalAiInterventions == 0
+    }
+    
+    /**
+     * 自动调整执行模式
+     */
+    private fun autoAdjustExecutionMode() {
+        if (!autoExecutionModeUpgrade) return
+        
+        val oldMode = executionMode
+        
+        when {
+            shouldUpgradeToAgentMode() -> {
+                executionMode = ExecutionMode.AGENT
+                log("🔄 执行模式自动升级: ${oldMode.emoji} ${oldMode.displayName} → ${executionMode.emoji} ${executionMode.displayName}")
+                log("   原因: 连续失败${consecutiveFailures}次，AI介入${totalAiInterventions}次")
+            }
+            shouldDowngradeToFastMode() -> {
+                executionMode = ExecutionMode.FAST
+                log("🔄 执行模式自动降级: ${oldMode.emoji} ${oldMode.displayName} → ${executionMode.emoji} ${executionMode.displayName}")
+                log("   原因: 连续成功${consecutiveSuccesses}次，执行稳定")
+            }
+        }
+    }
+    
+    /**
+     * 重置执行统计
+     */
+    fun resetExecutionStats() {
+        consecutiveFailures = 0
+        consecutiveSuccesses = 0
+        totalAiInterventions = 0
+    }
+    
+    // ==================== 👁️ MONITOR 模式辅助方法 ====================
+    
+    /**
+     * AI 验证步骤执行结果
+     */
+    private suspend fun verifyStepWithAI(step: ScriptStep, result: StepResult): AIVerifyResult {
+        try {
+            val screenState = getScreenStateForAI()
+            
+            val prompt = """
+你是一个 UI 自动化验证专家。请验证以下步骤是否执行成功。
+
+【步骤信息】
+- 类型: ${step.type.name}
+- 描述: ${step.description}
+- 执行结果: ${if (result.success) "代码层面成功" else "代码层面失败: ${result.error}"}
+
+【当前屏幕状态】
+$screenState
+
+【验证要求】
+1. 判断步骤是否真正执行成功（不只是代码返回成功）
+2. 检查页面是否符合预期状态
+
+请用 JSON 格式返回：
+{"verified": true/false, "confidence": 0-100, "reason": "简短原因"}
+""".trimIndent()
+            
+            val response = aiClient.chat(listOf(Message("user", prompt)))
+            val json = extractJson(response)
+            val map = gson.fromJson<Map<String, Any>>(json, object : TypeToken<Map<String, Any>>() {}.type)
+            
+            return AIVerifyResult(
+                verified = map["verified"] as? Boolean ?: result.success,
+                confidence = (map["confidence"] as? Number)?.toInt() ?: 50,
+                reason = map["reason"] as? String ?: "AI未返回原因"
+            )
+        } catch (e: Exception) {
+            log("⚠️ AI验证异常: ${e.message}")
+            // 验证失败时，信任代码层面的结果
+            return AIVerifyResult(
+                verified = result.success,
+                confidence = 50,
+                reason = "AI验证异常，使用代码结果"
+            )
+        }
+    }
+    
+    // ==================== 🤖 AGENT 模式辅助方法 ====================
+    
+    /**
+     * 获取屏幕状态供 AI 分析
+     */
+    private fun getScreenStateForAI(): String {
+        return try {
+            val smartReader = AgentService.getInstance()?.smartScreenReader
+            val tree = smartReader?.forceFullDump()
+            tree?.toSimpleString() ?: "无法获取屏幕状态"
+        } catch (e: Exception) {
+            "获取屏幕状态失败: ${e.message}"
+        }
+    }
+    
+    /**
+     * 询问 AI 下一步操作
+     */
+    private suspend fun askAIForNextAction(
+        goal: String,
+        currentScreen: String,
+        executedSteps: Int,
+        scriptSteps: List<String>
+    ): ScriptAIDecision {
+        try {
+            val prompt = """
+你是一个智能手机操作代理。根据当前屏幕状态，决定下一步操作。
+
+【任务目标】
+$goal
+
+【脚本参考步骤】
+${scriptSteps.mapIndexed { i, s -> "${i + 1}. $s" }.joinToString("\n")}
+
+【已执行步骤数】
+$executedSteps / ${scriptSteps.size}
+
+【当前屏幕状态】
+$currentScreen
+
+【决策选项】
+1. EXECUTE_STEP - 执行脚本中的某个步骤（指定步骤索引）
+2. CUSTOM_ACTION - 执行自定义操作（脚本中没有的）
+3. WAIT - 等待页面加载
+4. GOAL_ACHIEVED - 目标已完成
+5. GOAL_IMPOSSIBLE - 目标无法完成
+
+请用 JSON 格式返回：
+{
+  "type": "EXECUTE_STEP|CUSTOM_ACTION|WAIT|GOAL_ACHIEVED|GOAL_IMPOSSIBLE",
+  "action": "具体操作描述",
+  "stepIndex": 0-N（如果是EXECUTE_STEP）,
+  "waitMs": 毫秒数（如果是WAIT）,
+  "reason": "决策原因"
 }
+""".trimIndent()
+            
+            val response = aiClient.chat(listOf(Message("user", prompt)))
+            val json = extractJson(response)
+            val map = gson.fromJson<Map<String, Any>>(json, object : TypeToken<Map<String, Any>>() {}.type)
+            
+            val typeStr = map["type"] as? String ?: "EXECUTE_STEP"
+            return ScriptAIDecision(
+                type = ScriptAIDecisionType.valueOf(typeStr),
+                action = map["action"] as? String ?: "未知操作",
+                stepIndex = (map["stepIndex"] as? Number)?.toInt(),
+                waitMs = (map["waitMs"] as? Number)?.toLong(),
+                reason = map["reason"] as? String ?: ""
+            )
+        } catch (e: Exception) {
+            log("⚠️ AI决策异常: ${e.message}")
+            // 默认继续执行下一步
+            return ScriptAIDecision(
+                type = ScriptAIDecisionType.EXECUTE_STEP,
+                action = "继续执行",
+                stepIndex = executedSteps,
+                reason = "AI异常，默认继续"
+            )
+        }
+    }
+    
+    /**
+     * 执行 AI 自定义操作
+     */
+    private suspend fun executeCustomAIAction(decision: ScriptAIDecision): Boolean {
+        // 解析 AI 的自定义操作并执行
+        log("🤖 执行AI自定义操作: ${decision.action}")
+        // TODO: 实现具体的自定义操作解析和执行
+        return true
+    }
+}
+
+// ==================== 辅助数据类 ====================
 
 /**
  * 步骤执行结果
@@ -1263,4 +2398,35 @@ data class StepResult(
     val success: Boolean,
     val error: String? = null,
     val data: Map<String, Any>? = null
+)
+
+/**
+ * AI 验证结果
+ */
+data class AIVerifyResult(
+    val verified: Boolean,
+    val confidence: Int,
+    val reason: String
+)
+
+/**
+ * 脚本执行 AI 决策类型
+ */
+enum class ScriptAIDecisionType {
+    EXECUTE_STEP,    // 执行脚本步骤
+    CUSTOM_ACTION,   // 自定义操作
+    WAIT,            // 等待
+    GOAL_ACHIEVED,   // 目标完成
+    GOAL_IMPOSSIBLE  // 目标无法完成
+}
+
+/**
+ * 脚本执行 AI 决策
+ */
+data class ScriptAIDecision(
+    val type: ScriptAIDecisionType,
+    val action: String,
+    val stepIndex: Int? = null,
+    val waitMs: Long? = null,
+    val reason: String = ""
 )

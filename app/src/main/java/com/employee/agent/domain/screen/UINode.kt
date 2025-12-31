@@ -66,4 +66,48 @@ data class UINode(
         }
         children.forEach { it.collectClickables(result) }
     }
+    
+    /**
+     * 转换为简化的字符串表示（供 AI 分析）
+     * 只保留关键信息，减少 Token 消耗
+     */
+    fun toSimpleString(depth: Int = 0, maxDepth: Int = 5): String {
+        if (depth > maxDepth) return ""
+        
+        val indent = "  ".repeat(depth)
+        val builder = StringBuilder()
+        
+        // 只输出有意义的节点
+        val hasText = !text.isNullOrBlank()
+        val hasDesc = !contentDescription.isNullOrBlank()
+        val hasId = !resourceId.isNullOrBlank()
+        val isInteractive = isClickable
+        
+        if (hasText || hasDesc || hasId || isInteractive) {
+            val className = this.className.substringAfterLast('.')
+            builder.append(indent)
+            builder.append("[$className]")
+            
+            if (hasText) builder.append(" text=\"$text\"")
+            if (hasDesc) builder.append(" desc=\"$contentDescription\"")
+            if (hasId) builder.append(" id=\"${resourceId?.substringAfterLast('/')}\"")
+            if (isClickable) builder.append(" [可点击]")
+            
+            builder.append("\n")
+        }
+        
+        // 递归处理子节点
+        for (child in children) {
+            builder.append(child.toSimpleString(depth + 1, maxDepth))
+        }
+        
+        return builder.toString()
+    }
+    
+    /**
+     * 获取节点总数（用于判断树的大小）
+     */
+    fun getNodeCount(): Int {
+        return 1 + children.sumOf { it.getNodeCount() }
+    }
 }
