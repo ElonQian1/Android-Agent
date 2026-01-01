@@ -7,6 +7,8 @@ package com.employee.agent.application
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.util.Log
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.employee.agent.AgentService
 import com.employee.agent.application.executor.*
 import com.employee.agent.domain.execution.ExecutionConfig
@@ -50,6 +52,46 @@ class ScriptEngine(
     
     // 🛡️ 弹窗清理器
     private val popupDismisser = PopupDismisser(service)
+    
+    /**
+     * 🆕 获取 Root Window 的辅助函数
+     * 
+     * 先尝试 rootInActiveWindow，如果为 null 则从 windows 中获取活动窗口的 root
+     */
+    private fun getRootNode(): AccessibilityNodeInfo? {
+        service.rootInActiveWindow?.let { return it }
+        
+        try {
+            val windows = service.windows
+            if (windows != null && windows.isNotEmpty()) {
+                // 1. 优先选择 isActive 且 isFocused 的窗口
+                for (window in windows) {
+                    if (window.isActive && window.isFocused) {
+                        window.root?.let { return it }
+                    }
+                }
+                // 2. 选择 isActive 的应用窗口
+                for (window in windows) {
+                    if (window.isActive && window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        window.root?.let { return it }
+                    }
+                }
+                // 3. 选择任何 isActive 的窗口
+                for (window in windows) {
+                    if (window.isActive) {
+                        window.root?.let { return it }
+                    }
+                }
+                // 4. 兜底
+                windows.find { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.root != null }?.root?.let { return it }
+                for (window in windows) {
+                    window.root?.let { return it }
+                }
+            }
+        } catch (_: Exception) {}
+        
+        return null
+    }
     
     // 🎮 当前执行模式（默认智能模式）
     var executionMode: ExecutionMode = ExecutionMode.SMART
@@ -957,7 +999,7 @@ class ScriptEngine(
         // 如果有text参数，先尝试点击搜索框然后输入
         if (text != null) {
             // 尝试找到并点击包含"搜索"的元素
-            val root = service.rootInActiveWindow ?: return StepResult(false, "No window")
+            val root = getRootNode() ?: return StepResult(false, "No window")
             val searchBox = findMatchingNodeEnhanced(root, null, "搜索", null)
             if (searchBox != null) {
                 val rect = android.graphics.Rect()
@@ -1021,7 +1063,7 @@ class ScriptEngine(
      * 通过查找并点击底部导航栏的"首页"按钮
      */
     private suspend fun ensureXhsHomePage() {
-        val root = service.rootInActiveWindow ?: return
+        val root = getRootNode() ?: return
         
         // 方法1: 查找底部导航栏的"首页"按钮
         val homeTab = findMatchingNodeEnhanced(root, "首页", null, null)
@@ -1039,7 +1081,7 @@ class ScriptEngine(
             service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             delay(800)
             
-            val root2 = service.rootInActiveWindow ?: continue
+            val root2 = getRootNode() ?: continue
             val home2 = findMatchingNodeEnhanced(root2, "首页", null, null)
             if (home2 != null) {
                 val rect = android.graphics.Rect()
@@ -1086,7 +1128,7 @@ class ScriptEngine(
         
         log("🔍 FIND_AND_TAP: text=$text, contains=$contains, pattern=$pattern")
         
-        val root = service.rootInActiveWindow
+        val root = getRootNode()
         if (root == null) {
             val error = "无法获取当前窗口"
             debugInterface.recordError("NO_WINDOW", error, context = mapOf(
@@ -1140,7 +1182,7 @@ class ScriptEngine(
         val maxAttempts = 3  // 最多找3个匹配项（如果前面的被排除）
         
         for (i in 0 until maxScrolls) {
-            val root = service.rootInActiveWindow ?: continue
+            val root = getRootNode() ?: continue
             
             // 调试：打印当前可见的文本元素（仅在前3次滚动时）
             if (i < 3) {
@@ -1210,7 +1252,7 @@ class ScriptEngine(
     private data class PageValidation(val isValid: Boolean, val reason: String)
     
     private fun validatePageAfterTap(): PageValidation {
-        val root = service.rootInActiveWindow ?: return PageValidation(false, "无法获取页面")
+        val root = getRootNode() ?: return PageValidation(false, "无法获取页面")
         
         val allTexts = mutableListOf<String>()
         collectAllTexts(root, allTexts, 50)
@@ -1303,7 +1345,7 @@ class ScriptEngine(
         val selector = step.params["selector"] as? String
         val count = (step.params["count"] as? Number)?.toInt() ?: 5
         
-        val root = service.rootInActiveWindow ?: return StepResult(false, "No window")
+        val root = getRootNode() ?: return StepResult(false, "No window")
         val extractedItems = mutableListOf<String>()
         
         // 根据字段类型选择不同的提取策略
@@ -1442,7 +1484,7 @@ class ScriptEngine(
         log("⌨️ 输入文本: $text")
         
         // 方法1：通过无障碍服务的 ACTION_SET_TEXT
-        val root = service.rootInActiveWindow
+        val root = getRootNode()
         if (root != null) {
             // 查找当前聚焦的可编辑元素
             val focusedNode = root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
@@ -1546,7 +1588,7 @@ class ScriptEngine(
         log("🤖 AI 决策: $goal")
         
         // 获取当前屏幕状态
-        val root = service.rootInActiveWindow ?: return StepResult(false, "No window")
+        val root = getRootNode() ?: return StepResult(false, "No window")
         val elements = collectElements(root)
         
         // 调用 AI 决策
@@ -1627,7 +1669,7 @@ $elements
     }
     
     private fun findAndTapByText(text: String): StepResult {
-        val root = service.rootInActiveWindow ?: return StepResult(false, "No window")
+        val root = getRootNode() ?: return StepResult(false, "No window")
         val node = findMatchingNode(root, text, null, null)
         
         if (node != null) {

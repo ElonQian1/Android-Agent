@@ -40,6 +40,74 @@ class SocketServer(private val service: AccessibilityService) {
     private val screenAnalyzer = ScreenAnalyzer()
     private val scriptGenerator = ScriptGenerator()
     
+    /**
+     * 🆕 获取 Root Window 的辅助函数
+     * 
+     * 先尝试 rootInActiveWindow，如果为 null 则从 windows 中获取活动窗口的 root
+     * 这解决了部分设备（特别是小米/MIUI）上 rootInActiveWindow 返回 null 的问题
+     */
+    private fun getRootNode(): AccessibilityNodeInfo? {
+        // 首先尝试标准方法
+        service.rootInActiveWindow?.let { return it }
+        
+        // 备选方案：从 windows 列表中获取
+        try {
+            val windows = service.windows
+            if (windows != null && windows.isNotEmpty()) {
+                Log.d("Agent", "🔍 windows API: 找到 ${windows.size} 个窗口")
+                
+                // 1. 优先选择 isActive 且 isFocused 的窗口
+                for (window in windows) {
+                    if (window.isActive && window.isFocused) {
+                        window.root?.let { root ->
+                            Log.d("Agent", "✅ 使用活动焦点窗口 (类型: ${window.type}, 包: ${root.packageName})")
+                            return root
+                        }
+                    }
+                }
+                
+                // 2. 其次选择 isActive 的应用窗口（TYPE_APPLICATION = 1）
+                for (window in windows) {
+                    if (window.isActive && window.type == 1) {
+                        window.root?.let { root ->
+                            Log.d("Agent", "✅ 使用活动应用窗口 (包: ${root.packageName})")
+                            return root
+                        }
+                    }
+                }
+                
+                // 3. 选择任何 isActive 的窗口
+                for (window in windows) {
+                    if (window.isActive) {
+                        window.root?.let { root ->
+                            Log.d("Agent", "✅ 使用活动窗口 (类型: ${window.type}, 包: ${root.packageName})")
+                            return root
+                        }
+                    }
+                }
+                
+                // 4. 最后降级：选择任何有 root 的应用窗口
+                val appWindow = windows.find { it.type == 1 && it.root != null }
+                if (appWindow != null) {
+                    Log.d("Agent", "⚠️ 降级：使用首个应用窗口 (包: ${appWindow.root?.packageName})")
+                    return appWindow.root
+                }
+                
+                // 5. 兜底：任何有 root 的窗口
+                for (window in windows) {
+                    window.root?.let { root ->
+                        Log.d("Agent", "⚠️ 兜底：使用窗口 (类型: ${window.type}, 包: ${root.packageName})")
+                        return root
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("Agent", "windows API 获取失败: ${e.message}")
+        }
+        
+        return null
+    }
+    
     // 🆕 AI 自主执行引擎 (需要 API Key)
     private var aiEngine: AIAutonomousEngine? = null
     
@@ -140,8 +208,8 @@ class SocketServer(private val service: AccessibilityService) {
 
             when {
                 command == "DUMP" -> {
-                    // 原有的 UI 树 dump
-                    val root = service.rootInActiveWindow
+                    // 原有的 UI 树 dump（使用改进的 getRootNode）
+                    val root = getRootNode()
                     if (root != null) {
                         val dump = serializeNode(root)
                         output.println(gson.toJson(dump))
@@ -298,6 +366,9 @@ class SocketServer(private val service: AccessibilityService) {
                 }
                 command == "SCREEN_STATS" -> {
                     handleScreenStats(output)
+                }
+                command == "DEBUG_WINDOWS" -> {
+                    handleDebugWindows(output)
                 }
                 else -> {
                     output.println("""{"error":"UNKNOWN_COMMAND","message":"Unknown command: $command","hint":"发送 DEBUG_HELP 获取所有可用命令"}""")
@@ -578,13 +649,13 @@ class SocketServer(private val service: AccessibilityService) {
     }
     
     /**
-     * 获取当前屏幕信息
+     * 获取当前屏幕信息（使用改进的 getRootNode）
      */
     private fun handleDebugScreen(output: PrintWriter) {
         try {
-            val root = service.rootInActiveWindow
+            val root = getRootNode()
             if (root == null) {
-                output.println("""{"error":"NO_ROOT","message":"无法获取 UI 树，请确保目标应用在前台"}""")
+                output.println("""{"error":"NO_ROOT","message":"无法获取 UI 树，请确保目标应用在前台，或尝试重新开启无障碍服务"}""")
                 return
             }
             
@@ -606,6 +677,64 @@ class SocketServer(private val service: AccessibilityService) {
             output.println(gson.toJson(response))
         } catch (e: Exception) {
             Log.e("Agent", "DEBUG_SCREEN 失败", e)
+            output.println("""{"error":"DEBUG_FAILED","message":"${escapeJson(e.message ?: "Unknown")}"}""")
+        }
+    }
+    
+    /**
+     * 🆕 调试：获取所有窗口信息
+     */
+    private fun handleDebugWindows(output: PrintWriter) {
+        try {
+            val windowInfos = mutableListOf<Map<String, Any?>>()
+            
+            // 检查 rootInActiveWindow
+            val rootActive = service.rootInActiveWindow
+            val rootActiveInfo = if (rootActive != null) {
+                mapOf(
+                    "source" to "rootInActiveWindow",
+                    "package" to rootActive.packageName?.toString(),
+                    "class" to rootActive.className?.toString(),
+                    "child_count" to rootActive.childCount
+                )
+            } else {
+                mapOf("source" to "rootInActiveWindow", "status" to "NULL")
+            }
+            windowInfos.add(rootActiveInfo)
+            
+            // 检查 windows API
+            val windows = service.windows
+            if (windows != null) {
+                for ((index, window) in windows.withIndex()) {
+                    val root = window.root
+                    windowInfos.add(mapOf(
+                        "source" to "windows[$index]",
+                        "type" to window.type,
+                        "type_name" to when(window.type) {
+                            1 -> "APPLICATION"
+                            2 -> "INPUT_METHOD"
+                            3 -> "SYSTEM"
+                            4 -> "ACCESSIBILITY_OVERLAY"
+                            else -> "UNKNOWN(${window.type})"
+                        },
+                        "is_active" to window.isActive,
+                        "is_focused" to window.isFocused,
+                        "has_root" to (root != null),
+                        "package" to root?.packageName?.toString(),
+                        "child_count" to (root?.childCount ?: 0)
+                    ))
+                }
+            } else {
+                windowInfos.add(mapOf("source" to "windows", "status" to "NULL"))
+            }
+            
+            output.println(gson.toJson(mapOf(
+                "success" to true,
+                "window_count" to windows?.size,
+                "windows" to windowInfos
+            )))
+        } catch (e: Exception) {
+            Log.e("Agent", "DEBUG_WINDOWS 失败", e)
             output.println("""{"error":"DEBUG_FAILED","message":"${escapeJson(e.message ?: "Unknown")}"}""")
         }
     }
@@ -816,11 +945,11 @@ class SocketServer(private val service: AccessibilityService) {
     }
 
     /**
-     * 🆕 智能屏幕分析
+     * 🆕 智能屏幕分析（使用改进的 getRootNode）
      */
     private fun handleAnalyzeScreen(output: PrintWriter) {
         try {
-            val root = service.rootInActiveWindow
+            val root = getRootNode()
             if (root == null) {
                 output.println("""{"error":"NO_ROOT","message":"No root window available"}""")
                 return
@@ -866,7 +995,7 @@ class SocketServer(private val service: AccessibilityService) {
     }
     
     /**
-     * 🆕 生成执行脚本
+     * 🆕 生成执行脚本（使用改进的 getRootNode）
      */
     private fun handleGenerateScript(goal: String, output: PrintWriter) {
         try {
@@ -875,7 +1004,7 @@ class SocketServer(private val service: AccessibilityService) {
                 return
             }
             
-            val root = service.rootInActiveWindow
+            val root = getRootNode()
             if (root == null) {
                 output.println("""{"error":"NO_ROOT","message":"No root window available"}""")
                 return

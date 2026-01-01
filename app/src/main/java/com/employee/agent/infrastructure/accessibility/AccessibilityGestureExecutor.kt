@@ -7,6 +7,7 @@ import android.graphics.Path
 import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import androidx.annotation.RequiresApi
 import com.employee.agent.domain.agent.*
 import com.employee.agent.domain.tool.Tool
@@ -22,6 +23,41 @@ import kotlin.coroutines.resume
 class AccessibilityGestureExecutor(
     private val service: AccessibilityService
 ) {
+    
+    /**
+     * 🆕 获取 Root Window 的辅助函数
+     */
+    private fun getRootNode(): AccessibilityNodeInfo? {
+        service.rootInActiveWindow?.let { return it }
+        
+        try {
+            val windows = service.windows
+            if (windows != null && windows.isNotEmpty()) {
+                for (window in windows) {
+                    if (window.isActive && window.isFocused) {
+                        window.root?.let { return it }
+                    }
+                }
+                for (window in windows) {
+                    if (window.isActive && window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        window.root?.let { return it }
+                    }
+                }
+                for (window in windows) {
+                    if (window.isActive) {
+                        window.root?.let { return it }
+                    }
+                }
+                windows.find { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.root != null }?.root?.let { return it }
+                for (window in windows) {
+                    window.root?.let { return it }
+                }
+            }
+        } catch (_: Exception) {}
+        
+        return null
+    }
+    
     /**
      * 点击坐标
      */
@@ -49,7 +85,7 @@ class AccessibilityGestureExecutor(
      */
     suspend fun tapElement(text: String): ActionResult {
         return try {
-            val root = service.rootInActiveWindow
+            val root = getRootNode()
             if (root == null) {
                 return ActionResult(false, "无法获取屏幕内容")
             }
@@ -109,7 +145,7 @@ class AccessibilityGestureExecutor(
      */
     fun inputText(text: String): ActionResult {
         return try {
-            val root = service.rootInActiveWindow
+            val root = getRootNode()
             if (root == null) {
                 return ActionResult(false, "无法获取屏幕内容")
             }

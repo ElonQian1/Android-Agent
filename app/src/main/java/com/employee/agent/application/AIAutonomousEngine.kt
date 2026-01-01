@@ -10,6 +10,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.employee.agent.domain.screen.UINode
 import com.employee.agent.infrastructure.ai.HunyuanAIClient
 import com.employee.agent.infrastructure.vision.ScreenAnalyzer
@@ -37,6 +38,40 @@ class AIAutonomousEngine(
     private val aiClient = HunyuanAIClient(apiKey)
     private val screenAnalyzer = ScreenAnalyzer()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    /**
+     * 🆕 获取 Root Window 的辅助函数
+     */
+    private fun getRootNode(): AccessibilityNodeInfo? {
+        service.rootInActiveWindow?.let { return it }
+        
+        try {
+            val windows = service.windows
+            if (windows != null && windows.isNotEmpty()) {
+                for (window in windows) {
+                    if (window.isActive && window.isFocused) {
+                        window.root?.let { return it }
+                    }
+                }
+                for (window in windows) {
+                    if (window.isActive && window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        window.root?.let { return it }
+                    }
+                }
+                for (window in windows) {
+                    if (window.isActive) {
+                        window.root?.let { return it }
+                    }
+                }
+                windows.find { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.root != null }?.root?.let { return it }
+                for (window in windows) {
+                    window.root?.let { return it }
+                }
+            }
+        } catch (_: Exception) {}
+        
+        return null
+    }
     
     // 执行状态
     private var isRunning = false
@@ -158,7 +193,7 @@ class AIAutonomousEngine(
      */
     private fun observeScreen(): ScreenAnalysis? {
         return try {
-            val root = service.rootInActiveWindow ?: return null
+            val root = getRootNode() ?: return null
             val uiNode = convertToUINode(root)
             screenAnalyzer.analyze(uiNode)
         } catch (e: Exception) {

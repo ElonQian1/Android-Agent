@@ -4,6 +4,7 @@ package com.employee.agent.infrastructure.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.employee.agent.domain.screen.UINode
 import com.employee.agent.application.ScreenReader
 
@@ -15,6 +16,40 @@ class UITreeParser(
     private val service: AccessibilityService
 ) : ScreenReader {
     
+    /**
+     * 🆕 获取 Root Window 的辅助函数
+     */
+    private fun getRootNode(): AccessibilityNodeInfo? {
+        service.rootInActiveWindow?.let { return it }
+        
+        try {
+            val windows = service.windows
+            if (windows != null && windows.isNotEmpty()) {
+                for (window in windows) {
+                    if (window.isActive && window.isFocused) {
+                        window.root?.let { return it }
+                    }
+                }
+                for (window in windows) {
+                    if (window.isActive && window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        window.root?.let { return it }
+                    }
+                }
+                for (window in windows) {
+                    if (window.isActive) {
+                        window.root?.let { return it }
+                    }
+                }
+                windows.find { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.root != null }?.root?.let { return it }
+                for (window in windows) {
+                    window.root?.let { return it }
+                }
+            }
+        } catch (_: Exception) {}
+        
+        return null
+    }
+    
     override suspend fun readCurrentScreen(): UINode {
         return readCurrentScreenSync()
     }
@@ -23,7 +58,7 @@ class UITreeParser(
      * 同步版本（内部使用）
      */
     fun readCurrentScreenSync(): UINode {
-        val root = service.rootInActiveWindow
+        val root = getRootNode()
             ?: return UINode(
                 className = "Empty",
                 text = "无法获取屏幕根节点",
